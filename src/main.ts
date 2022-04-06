@@ -3,11 +3,9 @@ import glob from 'glob';
 import { promises as fs } from 'fs';
 
 export type IReplacements = {
-  replacements: {
-    find: string;
-    replace: string;
-  }[];
-};
+  find: string;
+  replace: string;
+}[];
 
 async function run(): Promise<void> {
   try {
@@ -30,7 +28,7 @@ async function run(): Promise<void> {
         const originalContent = await fs.readFile(file, encoding);
         let content = originalContent;
 
-        for (const pair of findData.replacements) {
+        for (const pair of findData) {
           content = content.replace(pair.find, pair.replace);
         }
 

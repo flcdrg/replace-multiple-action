@@ -60,7 +60,7 @@ function run() {
                 for (const file of matchedFiles) {
                     const originalContent = yield fs_1.promises.readFile(file, encoding);
                     let content = originalContent;
-                    for (const pair of findData.replacements) {
+                    for (const pair of findData) {
                         content = content.replace(pair.find, pair.replace);
                     }
                     if (originalContent !== content) {
