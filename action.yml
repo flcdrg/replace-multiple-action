@@ -1,11 +1,20 @@
-name: 'Your name here'
-description: 'Provide a description here'
-author: 'Your name or organization here'
+name: 'Replace multiple strings in files'
+description: 'Find and replace multiple strings over matching files'
+author: 'David Gardiner'
+branding:
+  icon: search
+  color: blue
 inputs:
-  milliseconds: # change this
+  files:
     required: true
-    description: 'input description here'
-    default: 'default value if applicable'
+    description: 'Globbing pattern to match files to search'
+    default: '.*.md'
+  find:
+    required: true
+    description: 'JSON array of strings to find and replacements'
+    default: './wayback/replacements.json'
+
 runs:
   using: 'node16'
   main: 'dist/index.js'
+
