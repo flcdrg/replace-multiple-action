@@ -20,9 +20,6 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - uses: ./
-        id: wayback
         with:
-          source-path: ./__tests__/data.json
-          timestamp-regex: '_posts\/(\d+)\/(?<year>\d+)-(?<month>\d+)-(?<day>\d+)-'
-
-      - run: echo ${{ steps.wayback.outputs.replacements }}
+          files: './*.md'
+          find: '[{ "find": "Multiple", "replace": "Many" }]'

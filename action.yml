@@ -8,11 +8,14 @@ inputs:
   files:
     required: true
     description: 'Globbing pattern to match files to search'
-    default: '.*.md'
+    default: '**/*.md'
   find:
     required: true
     description: 'JSON array of strings to find and replacements'
-    default: './wayback/replacements.json'
+  encoding:
+    required: false
+    description: 'Encoding of files to search. Should be one of ascii, utf8, utf-8, utf16le, ucs2, ucs-2'
+    default: 'utf-8'
 
 runs:
   using: 'node16'
