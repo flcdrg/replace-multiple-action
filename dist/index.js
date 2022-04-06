@@ -65,6 +65,7 @@ function run() {
                     }
                     if (originalContent !== content) {
                         yield fs_1.promises.writeFile(file, content, encoding);
+                        core.info(`Updating ${file}`);
                     }
                 }
             }));
