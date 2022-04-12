@@ -1,0 +1,12 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`in a link 1`] = `"some [text](https://wayback.org/http://localhost) blah blah"`;
+
+exports[`not links 1`] = `"some [text]http://localhost) blah blah and this -http://localhost"`;
+
+exports[`space separated 1`] = `"some text https://wayback.org/http://localhost blah blah"`;
+
+exports[`start and end 1`] = `
+"https://wayback.org/http://localhost blah 
+blah and https://wayback.org/http://localhost"
+`;
