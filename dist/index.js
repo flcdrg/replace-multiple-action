@@ -45,6 +45,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 const core = __importStar(__nccwpck_require__(186));
 const glob_1 = __importDefault(__nccwpck_require__(957));
 const fs_1 = __nccwpck_require__(147);
+const replaceInstances_1 = __nccwpck_require__(344);
 function run() {
     return __awaiter(this, void 0, void 0, function* () {
         try {
@@ -52,17 +53,15 @@ function run() {
             const files = core.getInput('files', { required: true });
             const find = core.getInput('find', { required: true });
             const encoding = core.getInput('encoding');
-            core.info(files);
-            core.info(find);
+            // if (prefix.length > 0 && suffix.length > 0) {
+            // }
             const findData = JSON.parse(find);
             // options is optional
-            (0, glob_1.default)('**/*.md', {}, (er, matchedFiles) => __awaiter(this, void 0, void 0, function* () {
+            (0, glob_1.default)(files, {}, (_, matchedFiles) => __awaiter(this, void 0, void 0, function* () {
                 for (const file of matchedFiles) {
                     const originalContent = yield fs_1.promises.readFile(file, encoding);
                     let content = originalContent;
-                    for (const pair of findData) {
-                        content = content.replace(pair.find, pair.replace);
-                    }
+                    content = (0, replaceInstances_1.replaceInstances)(findData, content);
                     if (originalContent !== content) {
                         yield fs_1.promises.writeFile(file, content, encoding);
                         core.info(`Updating ${file}`);
@@ -77,6 +76,30 @@ function run() {
     });
 }
 run();
+
+
+/***/ }),
+
+/***/ 344:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.replaceInstances = void 0;
+function replaceInstances(findData, content) {
+    for (const pair of findData) {
+        const pattern = 
+        // eslint-disable-next-line prefer-template
+        '(^|\\s+|\\()' +
+            // eslint-disable-next-line no-useless-escape
+            pair.find.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') +
+            '($|\\s+|\\))';
+        content = content.replace(new RegExp(pattern, 'g'), `$1${pair.replace}$2`);
+    }
+    return content;
+}
+exports.replaceInstances = replaceInstances;
 
 
 /***/ }),
