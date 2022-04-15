@@ -2,6 +2,9 @@ import { expect, test } from '@jest/globals';
 import { IReplacements } from '../src/main';
 import { replaceInstances } from '../src/replaceInstances';
 
+const prefix = '(^|\\s+|\\()';
+const suffix = '($|\\s+|\\))';
+
 test('space separated', () => {
   const data: IReplacements = [
     {
@@ -12,7 +15,7 @@ test('space separated', () => {
 
   const content = 'some text http://localhost blah blah';
 
-  const result = replaceInstances(data, content);
+  const result = replaceInstances(data, content, prefix, suffix);
 
   expect(result).toMatchSnapshot();
 });
@@ -27,7 +30,7 @@ test('start and end', () => {
 
   const content = 'http://localhost blah \nblah and http://localhost';
 
-  const result = replaceInstances(data, content);
+  const result = replaceInstances(data, content, prefix, suffix);
 
   expect(result).toMatchSnapshot();
 });
@@ -42,7 +45,7 @@ test('in a link', () => {
 
   const content = 'some [text](http://localhost) blah blah';
 
-  const result = replaceInstances(data, content);
+  const result = replaceInstances(data, content, prefix, suffix);
 
   expect(result).toMatchSnapshot();
 });
@@ -58,7 +61,7 @@ test('not links', () => {
   const content =
     'some [text]http://localhost) blah blah and this -http://localhost';
 
-  const result = replaceInstances(data, content);
+  const result = replaceInstances(data, content, prefix, suffix);
 
   expect(result).toMatchSnapshot();
 });
