@@ -16,6 +16,12 @@ inputs:
     required: false
     description: 'Encoding of files to search. Should be one of ascii, utf8, utf-8, utf16le, ucs2, ucs-2'
     default: 'utf-8'
+  prefix:
+    required: false
+    description: 'Part of a regular expression that is prepended to each ''find'' string when searching for text to replace'
+  suffix:
+    required: false
+    description: 'Part of a regular expression that is appended to each ''find'' string when searcing for text to replace'
 
 runs:
   using: 'node16'

@@ -18,6 +18,9 @@ async function run(): Promise<void> {
       'encoding'
     ) as BufferEncoding;
 
+    const prefix: string = core.getInput('prefix');
+    const suffix: string = core.getInput('suffix');
+
     // if (prefix.length > 0 && suffix.length > 0) {
 
     // }
@@ -29,7 +32,7 @@ async function run(): Promise<void> {
         const originalContent = await fs.readFile(file, encoding);
         let content = originalContent;
 
-        content = replaceInstances(findData, content);
+        content = replaceInstances(findData, content, prefix, suffix);
 
         if (originalContent !== content) {
           await fs.writeFile(file, content, encoding);

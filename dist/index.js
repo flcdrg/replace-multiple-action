@@ -53,6 +53,8 @@ function run() {
             const files = core.getInput('files', { required: true });
             const find = core.getInput('find', { required: true });
             const encoding = core.getInput('encoding');
+            const prefix = core.getInput('prefix');
+            const suffix = core.getInput('suffix');
             // if (prefix.length > 0 && suffix.length > 0) {
             // }
             const findData = JSON.parse(find);
@@ -61,7 +63,7 @@ function run() {
                 for (const file of matchedFiles) {
                     const originalContent = yield fs_1.promises.readFile(file, encoding);
                     let content = originalContent;
-                    content = (0, replaceInstances_1.replaceInstances)(findData, content);
+                    content = (0, replaceInstances_1.replaceInstances)(findData, content, prefix, suffix);
                     if (originalContent !== content) {
                         yield fs_1.promises.writeFile(file, content, encoding);
                         core.info(`Updating ${file}`);
@@ -87,14 +89,13 @@ run();
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.replaceInstances = void 0;
-function replaceInstances(findData, content) {
+function replaceInstances(findData, content, prefix, suffix) {
     for (const pair of findData) {
-        const pattern = 
-        // eslint-disable-next-line prefer-template
-        '(^|\\s+|\\()' +
+        const pattern = prefix +
+            // escape the find pattern
             // eslint-disable-next-line no-useless-escape
             pair.find.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') +
-            '($|\\s+|\\))';
+            suffix;
         content = content.replace(new RegExp(pattern, 'g'), `$1${pair.replace}$2`);
     }
     return content;
