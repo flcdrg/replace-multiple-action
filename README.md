@@ -24,7 +24,7 @@ steps:
   - uses: flcdrg/replace-multiple-action@v1
     with:
         files: './*.md'
-        find: '[{ "http://localhost": "https://localhost", "http://davidgardiner.net.au": "https://david.gardiner.net.au" }]'
+        find: '[{ "find": "http://localhost", "replace": "https://localhost"}, { "find": "http://davidgardiner.net.au", "replace": "https://david.gardiner.net.au" }]'
         prefix: '(^|\\s+|\\()'
         suffix: '($|\\s+|\\))'
 ```
