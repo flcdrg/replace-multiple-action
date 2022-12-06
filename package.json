@@ -27,7 +27,7 @@
   "license": "MIT",
   "dependencies": {
     "@actions/core": "^1.9.1",
-    "axios": "^1.2.0",
+    "axios": "^1.2.1",
     "glob": "^8.0.3"
   },
   "devDependencies": {
