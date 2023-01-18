@@ -28,7 +28,7 @@
   "dependencies": {
     "@actions/core": "^1.9.1",
     "axios": "^1.2.3",
-    "glob": "^8.0.3"
+    "glob": "^8.1.0"
   },
   "devDependencies": {
     "@types/glob": "^8.0.0",
