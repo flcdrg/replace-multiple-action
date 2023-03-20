@@ -14,7 +14,7 @@ export function replaceInstances(
       pair.find.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') +
       suffix;
 
-    content = content.replace(new RegExp(pattern, 'g'), `$1${pair.replace}$2`);
+    content = content.replace(new RegExp(pattern, 'g'), `${pair.replace}`);
   }
   return content;
 }
