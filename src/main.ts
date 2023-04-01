@@ -1,7 +1,7 @@
 import * as core from '@actions/core';
-import glob from 'glob';
 import { promises as fs } from 'fs';
 import { replaceInstances } from './replaceInstances';
+import { glob } from 'glob';
 
 export type IReplacements = {
   find: string;
@@ -27,19 +27,19 @@ async function run(): Promise<void> {
     const findData: IReplacements = JSON.parse(find);
 
     // options is optional
-    glob(files, {}, async (_, matchedFiles) => {
-      for (const file of matchedFiles) {
-        const originalContent = await fs.readFile(file, encoding);
-        let content = originalContent;
+    const matchedFiles = await glob(files, {});
 
-        content = replaceInstances(findData, content, prefix, suffix);
+    for (const file of matchedFiles) {
+      const originalContent = await fs.readFile(file, encoding);
+      let content = originalContent;
 
-        if (originalContent !== content) {
-          await fs.writeFile(file, content, encoding);
-          core.info(`Updating ${file}`);
-        }
+      content = replaceInstances(findData, content, prefix, suffix);
+
+      if (originalContent !== content) {
+        await fs.writeFile(file, content, encoding);
+        core.info(`Updating ${file}`);
       }
-    });
+    }
   } catch (error) {
     if (error instanceof Error) core.setFailed(error.message);
   }
