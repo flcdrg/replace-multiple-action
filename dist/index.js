@@ -52,8 +52,6 @@ function run() {
             const encoding = core.getInput('encoding');
             const prefix = core.getInput('prefix');
             const suffix = core.getInput('suffix');
-            // if (prefix.length > 0 && suffix.length > 0) {
-            // }
             const findData = JSON.parse(find);
             // options is optional
             const matchedFiles = yield (0, glob_1.glob)(files, {});
@@ -92,7 +90,19 @@ function replaceInstances(findData, content, prefix, suffix) {
             // eslint-disable-next-line no-useless-escape
             pair.find.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') +
             suffix;
-        content = content.replace(new RegExp(pattern, 'g'), `$1${pair.replace}$2`);
+        // Handle when prefix and/or suffix are empty
+        if (prefix !== '' && suffix !== '') {
+            content = content.replace(new RegExp(pattern, 'g'), `$1${pair.replace}$2`);
+        }
+        if (prefix === '' && suffix !== '') {
+            content = content.replace(new RegExp(pattern, 'g'), `${pair.replace}$1`);
+        }
+        if (prefix !== '' && suffix === '') {
+            content = content.replace(new RegExp(pattern, 'g'), `$1${pair.replace}`);
+        }
+        if (prefix === '' && suffix === '') {
+            content = content.replace(new RegExp(pattern, 'g'), pair.replace);
+        }
     }
     return content;
 }

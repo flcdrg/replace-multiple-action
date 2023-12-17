@@ -39,6 +39,14 @@ jobs:
         with:
           files: './*.md'
           find: '[{ "find": "Multiple", "replace": "Many" }]'
+
+      - uses: ./
+        with:
+          files: './*.md'
+          find: '[{ "find": "Multiple", "replace": "Many" }]'
+          prefix: ''
+          suffix: ''
+
   update_release_draft:
     name: Update release draft
     runs-on: ubuntu-latest
