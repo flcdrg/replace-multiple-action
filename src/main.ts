@@ -21,9 +21,6 @@ async function run(): Promise<void> {
     const prefix: string = core.getInput('prefix');
     const suffix: string = core.getInput('suffix');
 
-    // if (prefix.length > 0 && suffix.length > 0) {
-
-    // }
     const findData: IReplacements = JSON.parse(find);
 
     // options is optional

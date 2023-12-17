@@ -1,5 +1,11 @@
 // Jest Snapshot v1, https://goo.gl/fbAQLP
 
+exports[`empty prefix 1`] = `"some text replaceemtpyprefix blah blah"`;
+
+exports[`empty prefix and suffix 1`] = `"some text replaceemptyprefixsuffix blah blah"`;
+
+exports[`empty suffix 1`] = `"some text replaceemptysuffix blah blah"`;
+
 exports[`in a link 1`] = `"some [text](https://wayback.org/http://localhost) blah blah"`;
 
 exports[`not links 1`] = `"some [text]http://localhost) blah blah and this -http://localhost"`;

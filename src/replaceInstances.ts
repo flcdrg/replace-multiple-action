@@ -14,7 +14,22 @@ export function replaceInstances(
       pair.find.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') +
       suffix;
 
-    content = content.replace(new RegExp(pattern, 'g'), `$1${pair.replace}$2`);
+    // Handle when prefix and/or suffix are empty
+    if (prefix !== '' && suffix !== '') {
+      content = content.replace(
+        new RegExp(pattern, 'g'),
+        `$1${pair.replace}$2`
+      );
+    }
+    if (prefix === '' && suffix !== '') {
+      content = content.replace(new RegExp(pattern, 'g'), `${pair.replace}$1`);
+    }
+    if (prefix !== '' && suffix === '') {
+      content = content.replace(new RegExp(pattern, 'g'), `$1${pair.replace}`);
+    }
+    if (prefix === '' && suffix === '') {
+      content = content.replace(new RegExp(pattern, 'g'), pair.replace);
+    }
   }
   return content;
 }

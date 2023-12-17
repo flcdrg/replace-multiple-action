@@ -65,3 +65,48 @@ test('not links', () => {
 
   expect(result).toMatchSnapshot();
 });
+
+test('empty prefix and suffix', () => {
+  const data: IReplacements = [
+    {
+      find: 'find',
+      replace: 'replaceemptyprefixsuffix'
+    }
+  ];
+
+  const content = 'some text find blah blah';
+
+  const result = replaceInstances(data, content, '', '');
+
+  expect(result).toMatchSnapshot();
+});
+
+test('empty prefix', () => {
+  const data: IReplacements = [
+    {
+      find: 'find',
+      replace: 'replaceemtpyprefix'
+    }
+  ];
+
+  const content = 'some text find blah blah';
+
+  const result = replaceInstances(data, content, '(text )', '');
+
+  expect(result).toMatchSnapshot();
+});
+
+test('empty suffix', () => {
+  const data: IReplacements = [
+    {
+      find: 'find',
+      replace: 'replaceemptysuffix'
+    }
+  ];
+
+  const content = 'some text find blah blah';
+
+  const result = replaceInstances(data, content, '', '( blah)');
+
+  expect(result).toMatchSnapshot();
+});
