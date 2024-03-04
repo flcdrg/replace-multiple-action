@@ -47,6 +47,14 @@ jobs:
           prefix: ''
           suffix: ''
 
+      - uses: ./
+        with:
+          files: '__tests__/nodejs-*/.envfile'
+          find: '[{ "find": "DB_HOST=", "replace": "DB_HOST=dbserver" }]'
+          prefix: ''
+          suffix: ''
+  
+
   update_release_draft:
     name: Update release draft
     runs-on: ubuntu-latest

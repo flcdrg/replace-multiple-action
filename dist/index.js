@@ -63,6 +63,9 @@ function run() {
                     yield fs_1.promises.writeFile(file, content, encoding);
                     core.info(`Updating ${file}`);
                 }
+                else {
+                    core.info(`No changes made to ${file}`);
+                }
             }
         }
         catch (error) {
