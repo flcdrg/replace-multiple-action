@@ -110,3 +110,25 @@ test('empty suffix', () => {
 
   expect(result).toMatchSnapshot();
 });
+
+test('multiple replacements', () => {
+  const prefix = '';
+  const suffix = '';
+
+  const data: IReplacements = [
+    {
+      find: 'DB_USER=',
+      replace: 'DB_USER=FozzieBear',
+    },
+    {
+      find: 'DB_PASSWORD=',
+      replace: 'DB_PASSWORD=WockaWocka',
+    }
+  ];
+
+  const content = 'DB_HOST=\nDB_USER=\nDB_PASSWORD=\n';
+
+  const result = replaceInstances(data, content, prefix, suffix);
+
+  expect(result).toMatchSnapshot();
+});

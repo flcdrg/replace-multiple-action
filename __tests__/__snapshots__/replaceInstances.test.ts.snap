@@ -8,6 +8,13 @@ exports[`empty suffix 1`] = `"some text replaceemptysuffix blah blah"`;
 
 exports[`in a link 1`] = `"some [text](https://wayback.org/http://localhost) blah blah"`;
 
+exports[`multiple replacements 1`] = `
+"DB_HOST=
+DB_USER=FozzieBear
+DB_PASSWORD=WockaWocka
+"
+`;
+
 exports[`not links 1`] = `"some [text]http://localhost) blah blah and this -http://localhost"`;
 
 exports[`space separated 1`] = `"some text https://wayback.org/http://localhost blah blah"`;
