@@ -118,11 +118,11 @@ test('multiple replacements', () => {
   const data: IReplacements = [
     {
       find: 'DB_USER=',
-      replace: 'DB_USER=FozzieBear',
+      replace: 'DB_USER=FozzieBear'
     },
     {
       find: 'DB_PASSWORD=',
-      replace: 'DB_PASSWORD=WockaWocka',
+      replace: 'DB_PASSWORD=WockaWocka'
     }
   ];
 
