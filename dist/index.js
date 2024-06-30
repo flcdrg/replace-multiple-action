@@ -85,7 +85,7 @@ run();
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.replaceInstances = void 0;
+exports.replaceInstances = replaceInstances;
 function replaceInstances(findData, content, prefix, suffix) {
     for (const pair of findData) {
         const pattern = prefix +
@@ -109,7 +109,6 @@ function replaceInstances(findData, content, prefix, suffix) {
     }
     return content;
 }
-exports.replaceInstances = replaceInstances;
 
 
 /***/ }),
