@@ -10,7 +10,7 @@ export function replaceInstances(
     const pattern =
       prefix +
       // escape the find pattern
-      // eslint-disable-next-line no-useless-escape
+
       pair.find.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') +
       suffix;
 

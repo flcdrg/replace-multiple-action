@@ -100,7 +100,6 @@ function replaceInstances(findData, content, prefix, suffix) {
     for (const pair of findData) {
         const pattern = prefix +
             // escape the find pattern
-            // eslint-disable-next-line no-useless-escape
             pair.find.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') +
             suffix;
         // Handle when prefix and/or suffix are empty
