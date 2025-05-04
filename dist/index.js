@@ -65,6 +65,10 @@ function run() {
             const findData = JSON.parse(find);
             // options is optional
             const matchedFiles = yield (0, glob_1.glob)(files, {});
+            if (matchedFiles.length === 0) {
+                core.warning('No files matched the glob pattern');
+                return;
+            }
             for (const file of matchedFiles) {
                 const originalContent = yield fs_1.promises.readFile(file, encoding);
                 let content = originalContent;
@@ -79,8 +83,12 @@ function run() {
             }
         }
         catch (error) {
-            if (error instanceof Error)
+            if (error instanceof Error) {
                 core.setFailed(error.message);
+            }
+            else {
+                core.setFailed('Unknown error');
+            }
         }
     });
 }
