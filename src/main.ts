@@ -26,6 +26,11 @@ async function run(): Promise<void> {
     // options is optional
     const matchedFiles = await glob(files, {});
 
+    if (matchedFiles.length === 0) {
+      core.warning('No files matched the glob pattern');
+      return;
+    }
+
     for (const file of matchedFiles) {
       const originalContent = await fs.readFile(file, encoding);
       let content = originalContent;
@@ -40,7 +45,11 @@ async function run(): Promise<void> {
       }
     }
   } catch (error) {
-    if (error instanceof Error) core.setFailed(error.message);
+    if (error instanceof Error) {
+      core.setFailed(error.message);
+    } else {
+      core.setFailed('Unknown error');
+    }
   }
 }
 
