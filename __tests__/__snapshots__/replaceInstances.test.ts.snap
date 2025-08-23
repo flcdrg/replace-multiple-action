@@ -1,4 +1,16 @@
-// Jest Snapshot v1, https://goo.gl/fbAQLP
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`bug 282 - with no prefix or suffix 1`] = `
+"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>mirth</id>
+    <version>1.2.3</version>
+    <packageSourceUrl>https://github.com/flcdrg/au-packages/tree/master/mirth</packageSourceUrl>
+    <owners>Release</owners>
+  </metadata>
+</package>"
+`;
 
 exports[`empty prefix 1`] = `"some text replaceemtpyprefix blah blah"`;
 
