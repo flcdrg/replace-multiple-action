@@ -132,3 +132,30 @@ test('multiple replacements', () => {
 
   expect(result).toMatchSnapshot();
 });
+
+test('bug 282 - with no prefix or suffix', () => {
+  const data: IReplacements = [
+    {
+      find: '$version$',
+      replace: '1.2.3'
+    },
+    {
+      find: '$configuration$',
+      replace: 'Release'
+    }
+  ];
+
+  const content = `<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>mirth</id>
+    <version>$version$</version>
+    <packageSourceUrl>https://github.com/flcdrg/au-packages/tree/master/mirth</packageSourceUrl>
+    <owners>$configuration$</owners>
+  </metadata>
+</package>`;
+
+  const result = replaceInstances(data, content, '', '');
+
+  expect(result).toMatchSnapshot();
+});
