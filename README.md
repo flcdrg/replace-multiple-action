@@ -8,8 +8,8 @@ This action searches matching files for strings and replaces any matches with re
 
 ```yaml
 steps:
-      - uses: actions/checkout@v3
-      - uses: flcdrg/replace-multiple-action@v1
+      - uses: actions/checkout@v5
+      - uses: flcdrg/replace-multiple-action@v2
         with:
           files: './*.md'
           find: '[{ "find": "Multiple", "replace": "Many" }]'
@@ -21,7 +21,7 @@ Search for Markdown files in the current directory. In each matching file, searc
 
 ```yaml
 steps:
-  - uses: flcdrg/replace-multiple-action@v1
+  - uses: flcdrg/replace-multiple-action@v2
     with:
         files: './*.md'
         find: '[{ "find": "http://localhost", "replace": "https://localhost"}, { "find": "http://davidgardiner.net.au", "replace": "https://david.gardiner.net.au" }]'
@@ -43,7 +43,7 @@ steps:
         timestamp-regex: '_posts\/(\d+)\/(?<year>\d+)-(?<month>\d+)-(?<day>\d+)-'
         
   - name: Replacements
-    uses: flcdrg/replace-multiple-action@v1
+    uses: flcdrg/replace-multiple-action@v2
     with:
         find: ${{ steps.wayback.outputs.replacements }}
         prefix: '(^|\\s+|\\()'
@@ -58,5 +58,5 @@ Various inputs are defined in [`action.yml`](action.yml) to let you configure th
 | - | - | - |
 | `files` | A wildcard glob used to match files that should be searched | `**/*.md` |
 | `find` | A JSON array of strings to find and values to replace. The JSON array should conform to this structure. `{ find: string; replace: string; }[]`  | |
-| `prefix` | Part of a regular expression that is prepended to the search string to add additional context on when to match the string. | |
-| `suffix` | Part of a regular expression that is appended to the search string to add additional context on when to match the string. | |
+| `prefix` | (optional) Part of a regular expression that is prepended to the search string to add additional context on when to match the string. The matched value of this regular expression group also prepended to the replacement value. | |
+| `suffix` | (optional) Part of a regular expression that is appended to the search string to add additional context on when to match the string. The matched value of this regular expression group is also appended to the replacement value. | |
