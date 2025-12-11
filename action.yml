@@ -24,6 +24,6 @@ inputs:
     description: 'Part of a regular expression that is appended to each ''find'' string when searcing for text to replace'
 
 runs:
-  using: 'node20'
+  using: 'node24'
   main: 'dist/index.js'
 
