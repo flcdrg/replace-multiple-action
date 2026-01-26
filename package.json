@@ -29,7 +29,7 @@
     "@actions/core": "^2.0.2",
     "axios": "^1.13.3",
     "glob": "^13.0.0",
-    "lru-cache": "^11.2.4"
+    "lru-cache": "^11.2.5"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.3.3",
