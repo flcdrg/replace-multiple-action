@@ -27,7 +27,7 @@
   "license": "MIT",
   "dependencies": {
     "@actions/core": "^2.0.3",
-    "axios": "^1.13.4",
+    "axios": "^1.13.5",
     "glob": "^13.0.1",
     "lru-cache": "^11.2.5"
   },
