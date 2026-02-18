@@ -28,7 +28,7 @@
   "dependencies": {
     "@actions/core": "^2.0.3",
     "axios": "^1.13.5",
-    "glob": "^13.0.4",
+    "glob": "^13.0.5",
     "lru-cache": "^11.2.6"
   },
   "devDependencies": {
