@@ -19,8 +19,8 @@ importers:
         specifier: ^1.13.5
         version: 1.13.5
       glob:
-        specifier: ^13.0.4
-        version: 13.0.4
+        specifier: ^13.0.5
+        version: 13.0.5
       lru-cache:
         specifier: ^11.2.6
         version: 11.2.6
@@ -1489,8 +1489,8 @@ packages:
     deprecated: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
     hasBin: true
 
-  glob@13.0.4:
-    resolution: {integrity: sha512-KACie1EOs9BIOMtenFaxwmYODWA3/fTfGSUnLhMJpXRntu1g+uL/Xvub5f8SCTppvo9q62Qy4LeOoUiaL54G5A==}
+  glob@13.0.5:
+    resolution: {integrity: sha512-BzXxZg24Ibra1pbQ/zE7Kys4Ua1ks7Bn6pKLkVPZ9FZe4JQS6/Q7ef3LG1H+k7lUf5l4T3PLSyYyYJVYUvfgTw==}
     engines: {node: 20 || >=22}
 
   glob@7.2.3:
@@ -4301,7 +4301,7 @@ snapshots:
       package-json-from-dist: 1.0.0
       path-scurry: 1.11.1
 
-  glob@13.0.4:
+  glob@13.0.5:
     dependencies:
       minimatch: 10.2.1
       minipass: 7.1.2
