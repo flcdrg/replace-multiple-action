@@ -26,7 +26,7 @@
   "author": "David Gardiner",
   "license": "MIT",
   "dependencies": {
-    "@actions/core": "^2.0.3",
+    "@actions/core": "^3.0.0",
     "axios": "^1.13.5",
     "glob": "^13.0.6",
     "lru-cache": "^11.2.6"
