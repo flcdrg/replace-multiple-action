@@ -4,6 +4,7 @@ on: # rebuild any PRs and main branch changes
   push:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
   build: # make sure build/ci work properly
@@ -60,7 +61,7 @@ jobs:
           find: '[{ "find": "DB_HOST=", "replace": "DB_HOST=dbserver" }]'
           prefix: ''
           suffix: ''
-  
+
   update_release_draft:
     name: Update release draft
     runs-on: ubuntu-latest
