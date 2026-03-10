@@ -70,7 +70,7 @@ jobs:
 
     if: github.ref == 'refs/heads/main' # Running this job only for master branch
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: release-drafter/release-drafter@v6
         id: create_release
