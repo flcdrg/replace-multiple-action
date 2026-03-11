@@ -28092,11 +28092,20 @@ async function run() {
     try {
         info('starting');
         const files = getInput('files', { required: true });
-        const find = getInput('find', { required: true });
+        const find = getInput('find');
+        const findJsonFile = getInput('findJsonFile');
         const encoding = getInput('encoding');
         const prefix = getInput('prefix');
         const suffix = getInput('suffix');
-        const findData = JSON.parse(find);
+        if (!find && !findJsonFile) {
+            throw new Error("One of 'find' or 'findJsonFile' inputs is required");
+        }
+        let findJson = find;
+        if (findJsonFile) {
+            findJson = await fs$1.promises.readFile(findJsonFile, encoding);
+            info(`Loaded replacements from ${findJsonFile}`);
+        }
+        const findData = JSON.parse(findJson);
         // options is optional
         const matchedFiles = await Ze(files, {});
         if (matchedFiles.length === 0) {

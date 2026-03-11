@@ -10,8 +10,11 @@ inputs:
     description: 'Globbing pattern to match files to search'
     default: '**/*.md'
   find:
-    required: true
+    required: false
     description: 'JSON array of strings to find and replacements'
+  findJsonFile:
+    required: false
+    description: 'Path to a JSON file containing the array of find and replace objects. Use when the JSON is too large for the find input'
   encoding:
     required: false
     description: 'Encoding of files to search. Should be one of ascii, utf8, utf-8, utf16le, ucs2, ucs-2'
