@@ -12,7 +12,8 @@ async function run(): Promise<void> {
   try {
     core.info('starting');
     const files: string = core.getInput('files', { required: true });
-    const find: string = core.getInput('find', { required: true });
+    const find: string = core.getInput('find');
+    const findJsonFile: string = core.getInput('findJsonFile');
 
     const encoding: BufferEncoding = core.getInput(
       'encoding'
@@ -21,7 +22,18 @@ async function run(): Promise<void> {
     const prefix: string = core.getInput('prefix');
     const suffix: string = core.getInput('suffix');
 
-    const findData: IReplacements = JSON.parse(find);
+    if (!find && !findJsonFile) {
+      throw new Error("One of 'find' or 'findJsonFile' inputs is required");
+    }
+
+    let findJson = find;
+
+    if (findJsonFile) {
+      findJson = await fs.readFile(findJsonFile, encoding);
+      core.info(`Loaded replacements from ${findJsonFile}`);
+    }
+
+    const findData: IReplacements = JSON.parse(findJson);
 
     // options is optional
     const matchedFiles = await glob(files, {});

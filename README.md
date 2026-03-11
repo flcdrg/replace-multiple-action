@@ -15,6 +15,19 @@ steps:
           find: '[{ "find": "Multiple", "replace": "Many" }]'
 ```
 
+### Example using `findJsonFile`
+
+When the replacement payload is too large to pass through the `find` input, write it to a file and pass that file path to `findJsonFile`.
+
+```yaml
+steps:
+  - uses: actions/checkout@v5
+  - uses: flcdrg/replace-multiple-action@v2
+    with:
+      files: './*.md'
+      findJsonFile: './replacements.json'
+```
+
 ### Example updating links in Markdown
 
 Search for Markdown files in the current directory. In each matching file, search for Markdown links. eg. that start the line, have whitespace or a left bracket preceding them, and have an end of line, whitespace or right bracket immediately after them.
@@ -57,6 +70,7 @@ Various inputs are defined in [`action.yml`](action.yml) to let you configure th
 | Name | Description | Default |
 | - | - | - |
 | `files` | A wildcard glob used to match files that should be searched | `**/*.md` |
-| `find` | A JSON array of strings to find and values to replace. The JSON array should conform to this structure. `{ find: string; replace: string; }[]`  | |
+| `find` | A JSON array of strings to find and values to replace. The JSON array should conform to this structure. `{ find: string; replace: string; }[]` | |
+| `findJsonFile` | (optional) Path to a JSON file containing the replacements array. Use this when the payload is too large for `find`. | |
 | `prefix` | (optional) Part of a regular expression that is prepended to the search string to add additional context on when to match the string. The matched value of this regular expression group also prepended to the replacement value. | |
 | `suffix` | (optional) Part of a regular expression that is appended to the search string to add additional context on when to match the string. The matched value of this regular expression group is also appended to the replacement value. | |
