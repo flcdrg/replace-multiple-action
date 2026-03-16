@@ -12,21 +12,28 @@ on:
     paths-ignore:
       - '**.md'
   pull_request:
+    branches:
+      - main
     paths-ignore:
       - '**.md'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   check-dist:
+    name: Check dist/
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@v6
 
-      - name: Set Node.js 24.x
+      - name: Setup Node.js
         uses: actions/setup-node@v6.3.0
         with:
-          node-version: 24.x
+          node-version-file: package.json
 
       - uses: pnpm/action-setup@v4
 
@@ -38,14 +45,19 @@ jobs:
           pnpm run build
           pnpm run package
 
-      - name: Compare the expected and actual dist/ directories
+      - name: Compare Directories
+        id: diff
         run: |
-          if [ "$(git diff --ignore-space-at-eol dist/ | wc -l)" -gt "0" ]; then
-            echo "Detected uncommitted changes after build.  See status below:"
-            git diff
+          if [ ! -d dist/ ]; then
+            echo "Expected dist/ directory does not exist.  See status below:"
+            ls -la ./
             exit 1
           fi
-        id: diff
+          if [ "$(git diff --name-only dist/ | wc -l)" -gt "0" ]; then
+              echo "Detected uncommitted changes after build. See status below:"
+              git diff --stat dist/
+              exit 1
+          fi
 
       # If index.js was different than expected, upload the expected version as an artifact
       - uses: actions/upload-artifact@v7
