@@ -29,7 +29,7 @@
     "@actions/core": "^3.0.0",
     "axios": "^1.14.0",
     "glob": "^13.0.6",
-    "lru-cache": "^11.2.7",
+    "lru-cache": "^11.3.0",
     "tslib": "^2.8.1"
   },
   "devDependencies": {
