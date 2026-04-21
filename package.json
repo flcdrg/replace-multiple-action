@@ -10,7 +10,7 @@
     "format-check": "prettier --check **/*.ts",
     "lint": "eslint src/**/*.ts --fix",
     "lint-check": "eslint src/**/*.ts",
-    "package": "pnpx rimraf ./dist && pnpm rollup --config rollup.config.ts --configPlugin @rollup/plugin-typescript",
+    "package": "pnpm dlx rimraf ./dist && pnpm rollup --config rollup.config.ts --configPlugin @rollup/plugin-typescript",
     "test": "jest",
     "all": "pnpm run build && pnpm run format && pnpm run lint && pnpm run package && pnpm test"
   },
@@ -54,7 +54,7 @@
     "nerdbank-gitversioning": "^3.9.50",
     "patch-package": "^8.0.1",
     "prettier": "^3.1.1",
-    "rollup": "^4.60.1",
+    "rollup": "^4.60.2",
     "rollup-plugin-license": "^3.7.1",
     "ts-jest": "^29.4.9",
     "typescript": "^5.9.3"
