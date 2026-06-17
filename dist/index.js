@@ -45,16 +45,16 @@ var require$$0$4 = require('node:diagnostics_channel');
 var require$$3 = require('node:util');
 var require$$4 = require('node:tls');
 var require$$0$5 = require('node:buffer');
-var require$$3$1 = require('node:zlib');
+var require$$0$6 = require('node:zlib');
 var require$$5$1 = require('node:perf_hooks');
 var require$$8 = require('node:util/types');
+var require$$2$1 = require('node:worker_threads');
 var require$$2$2 = require('node:crypto');
 var require$$1$1 = require('node:sqlite');
-var require$$2$1 = require('node:worker_threads');
 var require$$1$2 = require('node:url');
 var require$$1$3 = require('node:async_hooks');
 var require$$1$4 = require('node:console');
-var require$$0$6 = require('node:fs/promises');
+var require$$0$7 = require('node:fs/promises');
 var require$$1$5 = require('node:path');
 var require$$2$3 = require('node:timers');
 var require$$1$6 = require('node:dns');
@@ -1829,8 +1829,6 @@ function requireUtil$5 () {
 	const { headerNameLowerCasedRecord } = requireConstants$4();
 	const { tree } = requireTree();
 
-	const [nodeMajor, nodeMinor] = process.versions.node.split('.', 2).map(v => Number(v));
-
 	class BodyAsyncIterable {
 	  constructor (body) {
 	    this[kBody] = body;
@@ -1902,23 +1900,9 @@ function requireUtil$5 () {
 	/**
 	 * @param {*} object
 	 * @returns {object is Blob}
-	 * based on https://github.com/node-fetch/fetch-blob/blob/8ab587d34080de94140b54f07168451e7d0b655e/index.js#L229-L241 (MIT License)
 	 */
 	function isBlobLike (object) {
-	  if (object === null) {
-	    return false
-	  } else if (object instanceof Blob) {
-	    return true
-	  } else if (typeof object !== 'object') {
-	    return false
-	  } else {
-	    const sTag = object[Symbol.toStringTag];
-
-	    return (sTag === 'Blob' || sTag === 'File') && (
-	      ('stream' in object && typeof object.stream === 'function') ||
-	      ('arrayBuffer' in object && typeof object.arrayBuffer === 'function')
-	    )
-	  }
+	  return object instanceof Blob
 	}
 
 	/**
@@ -2154,7 +2138,7 @@ function requireUtil$5 () {
 	 */
 	function hasSafeIterator (obj) {
 	  const prototype = Object.getPrototypeOf(obj);
-	  const ownIterator = Object.prototype.hasOwnProperty.call(obj, Symbol.iterator);
+	  const ownIterator = Object.hasOwn(obj, Symbol.iterator);
 	  return ownIterator || (prototype != null && prototype !== Object.prototype && typeof obj[Symbol.iterator] === 'function')
 	}
 
@@ -2257,19 +2241,39 @@ function requireUtil$5 () {
 	    const key = headerNameToString(headers[i]);
 	    let val = obj[key];
 
-	    if (val) {
-	      if (typeof val === 'string') {
-	        val = [val];
-	        obj[key] = val;
-	      }
-	      val.push(headers[i + 1].toString('latin1'));
-	    } else {
-	      const headersValue = headers[i + 1];
-	      if (typeof headersValue === 'string') {
-	        obj[key] = headersValue;
+	    if (val !== undefined) {
+	      if (!Object.hasOwn(obj, key)) {
+	        const headersValue = typeof headers[i + 1] === 'string'
+	          ? headers[i + 1]
+	          : Array.isArray(headers[i + 1])
+	            ? headers[i + 1].map(x => x.toString('latin1'))
+	            : headers[i + 1].toString('latin1');
+
+	        if (key === '__proto__') {
+	          Object.defineProperty(obj, key, {
+	            value: headersValue,
+	            enumerable: true,
+	            configurable: true,
+	            writable: true
+	          });
+	        } else {
+	          obj[key] = headersValue;
+	        }
 	      } else {
-	        obj[key] = Array.isArray(headersValue) ? headersValue.map(x => x.toString('latin1')) : headersValue.toString('latin1');
+	        if (typeof val === 'string') {
+	          val = [val];
+	          obj[key] = val;
+	        }
+	        val.push(headers[i + 1].toString('latin1'));
 	      }
+	    } else {
+	      const headersValue = typeof headers[i + 1] === 'string'
+	        ? headers[i + 1]
+	        : Array.isArray(headers[i + 1])
+	          ? headers[i + 1].map(x => x.toString('latin1'))
+	          : headers[i + 1].toString('latin1');
+
+	      obj[key] = headersValue;
 	    }
 	  }
 
@@ -2305,6 +2309,26 @@ function requireUtil$5 () {
 	}
 
 	/**
+	 * @param {Record<string, string | string[]>} headers
+	 * @returns {Buffer[]}
+	 */
+	function toRawHeaders (headers) {
+	  const rawHeaders = [];
+
+	  for (const [name, value] of Object.entries(headers)) {
+	    if (Array.isArray(value)) {
+	      for (const entry of value) {
+	        rawHeaders.push(Buffer.from(name, 'latin1'), Buffer.from(`${entry}`, 'latin1'));
+	      }
+	    } else {
+	      rawHeaders.push(Buffer.from(name, 'latin1'), Buffer.from(`${value}`, 'latin1'));
+	    }
+	  }
+
+	  return rawHeaders
+	}
+
+	/**
 	 * @param {string[]} headers
 	 * @param {Buffer[]} headers
 	 */
@@ -2337,38 +2361,37 @@ function requireUtil$5 () {
 	    throw new InvalidArgumentError('handler must be an object')
 	  }
 
-	  if (typeof handler.onRequestStart === 'function') {
-	    // TODO (fix): More checks...
-	    return
+	  if (typeof handler.onRequestStart !== 'function') {
+	    throw new InvalidArgumentError('invalid onRequestStart method')
 	  }
 
-	  if (typeof handler.onConnect !== 'function') {
-	    throw new InvalidArgumentError('invalid onConnect method')
-	  }
-
-	  if (typeof handler.onError !== 'function') {
-	    throw new InvalidArgumentError('invalid onError method')
+	  if (typeof handler.onResponseError !== 'function') {
+	    throw new InvalidArgumentError('invalid onResponseError method')
 	  }
 
 	  if (typeof handler.onBodySent !== 'function' && handler.onBodySent !== undefined) {
 	    throw new InvalidArgumentError('invalid onBodySent method')
 	  }
 
+	  if (typeof handler.onRequestSent !== 'function' && handler.onRequestSent !== undefined) {
+	    throw new InvalidArgumentError('invalid onRequestSent method')
+	  }
+
 	  if (upgrade || method === 'CONNECT') {
-	    if (typeof handler.onUpgrade !== 'function') {
-	      throw new InvalidArgumentError('invalid onUpgrade method')
+	    if (typeof handler.onRequestUpgrade !== 'function') {
+	      throw new InvalidArgumentError('invalid onRequestUpgrade method')
 	    }
 	  } else {
-	    if (typeof handler.onHeaders !== 'function') {
-	      throw new InvalidArgumentError('invalid onHeaders method')
+	    if (typeof handler.onResponseStart !== 'function') {
+	      throw new InvalidArgumentError('invalid onResponseStart method')
 	    }
 
-	    if (typeof handler.onData !== 'function') {
-	      throw new InvalidArgumentError('invalid onData method')
+	    if (typeof handler.onResponseData !== 'function') {
+	      throw new InvalidArgumentError('invalid onResponseData method')
 	    }
 
-	    if (typeof handler.onComplete !== 'function') {
-	      throw new InvalidArgumentError('invalid onComplete method')
+	    if (typeof handler.onResponseEnd !== 'function') {
+	      throw new InvalidArgumentError('invalid onResponseEnd method')
 	    }
 	  }
 	}
@@ -2609,7 +2632,7 @@ function requireUtil$5 () {
 	 */
 	function errorRequest (client, request, err) {
 	  try {
-	    request.onError(err);
+	    request.onResponseError(err);
 	    assert(request.aborted);
 	  } catch (err) {
 	    client.emit('error', err);
@@ -2758,6 +2781,7 @@ function requireUtil$5 () {
 	  removeAllListeners,
 	  errorRequest,
 	  parseRawHeaders,
+	  toRawHeaders,
 	  encodeRawHeaders,
 	  parseHeaders,
 	  parseKeepAliveTimeout,
@@ -2780,8 +2804,6 @@ function requireUtil$5 () {
 	  normalizedMethodRecords,
 	  isValidPort,
 	  isHttpOrHttpsPrefixed,
-	  nodeMajor,
-	  nodeMinor,
 	  safeHTTPMethods: Object.freeze(['GET', 'HEAD', 'OPTIONS', 'TRACE']),
 	  wrapRequestBody,
 	  setupConnectTimeout,
@@ -3014,10 +3036,12 @@ function requireDiagnostics () {
 
 	  diagnosticsChannel.subscribe('undici:websocket:open',
 	    evt => {
-	      const {
-	        address: { address, port }
-	      } = evt;
-	      debugLog('connection opened %s%s', address, port ? `:${port}` : '');
+	      if (evt.address != null) {
+	        const { address, port } = evt.address;
+	        debugLog('connection opened %s%s', address, port ? `:${port}` : '');
+	      } else {
+	        debugLog('connection opened');
+	      }
 	    });
 
 	  diagnosticsChannel.subscribe('undici:websocket:close',
@@ -3086,6 +3110,7 @@ function requireRequest$1 () {
 	  hasSafeIterator,
 	  isBlobLike,
 	  serializePathWithQuery,
+	  parseHeaders,
 	  assertRequestHandler,
 	  getServerName,
 	  normalizedMethodRecords,
@@ -3098,6 +3123,55 @@ function requireRequest$1 () {
 	const invalidPathRegex = /[^\u0021-\u00ff]/;
 
 	const kHandler = Symbol('handler');
+	const kController = Symbol('controller');
+	const kResume = Symbol('resume');
+
+	class RequestController {
+	  #paused = false
+	  #reason = null
+	  #aborted = false
+	  #abort
+
+	  [kResume] = null
+
+	  rawHeaders = null
+	  rawTrailers = null
+
+	  constructor (abort) {
+	    this.#abort = abort;
+	  }
+
+	  pause () {
+	    this.#paused = true;
+	  }
+
+	  resume () {
+	    if (this.#paused) {
+	      this.#paused = false;
+	      this[kResume]?.();
+	    }
+	  }
+
+	  abort (reason) {
+	    if (!this.#aborted) {
+	      this.#aborted = true;
+	      this.#reason = reason;
+	      this.#abort(reason);
+	    }
+	  }
+
+	  get aborted () {
+	    return this.#aborted
+	  }
+
+	  get reason () {
+	    return this.#reason
+	  }
+
+	  get paused () {
+	    return this.#paused
+	  }
+	}
 
 	class Request {
 	  constructor (origin, {
@@ -3311,23 +3385,26 @@ function requireRequest$1 () {
 	    }
 	  }
 
-	  onConnect (abort) {
+	  onRequestStart (abort, context) {
 	    assert(!this.aborted);
 	    assert(!this.completed);
 
+	    this[kController] = new RequestController(abort);
+
 	    if (this.error) {
-	      abort(this.error);
-	    } else {
-	      this.abort = abort;
-	      return this[kHandler].onConnect(abort)
+	      this[kController].abort(this.error);
+	      return
 	    }
+
+	    this.abort = abort;
+	    return this[kHandler].onRequestStart(this[kController], context)
 	  }
 
 	  onResponseStarted () {
 	    return this[kHandler].onResponseStarted?.()
 	  }
 
-	  onHeaders (statusCode, headers, resume, statusText) {
+	  onResponseStart (statusCode, headers, resume, statusText) {
 	    assert(!this.aborted);
 	    assert(!this.completed);
 
@@ -3335,36 +3412,56 @@ function requireRequest$1 () {
 	      channels.headers.publish({ request: this, response: { statusCode, headers, statusText } });
 	    }
 
-	    try {
-	      return this[kHandler].onHeaders(statusCode, headers, resume, statusText)
-	    } catch (err) {
-	      this.abort(err);
+	    const controller = this[kController];
+	    if (controller) {
+	      controller[kResume] = resume;
+	      controller.rawHeaders = headers;
 	    }
-	  }
 
-	  onData (chunk) {
-	    assert(!this.aborted);
-	    assert(!this.completed);
+	    const parsedHeaders = Array.isArray(headers) ? parseHeaders(headers) : headers;
 
-	    if (channels.bodyChunkReceived.hasSubscribers) {
-	      channels.bodyChunkReceived.publish({ request: this, chunk });
-	    }
 	    try {
-	      return this[kHandler].onData(chunk)
+	      this[kHandler].onResponseStart?.(controller, statusCode, parsedHeaders, statusText);
+	      return !controller?.paused
 	    } catch (err) {
 	      this.abort(err);
 	      return false
 	    }
 	  }
 
-	  onUpgrade (statusCode, headers, socket) {
+	  onResponseData (chunk) {
 	    assert(!this.aborted);
 	    assert(!this.completed);
 
-	    return this[kHandler].onUpgrade(statusCode, headers, socket)
+	    if (channels.bodyChunkReceived.hasSubscribers) {
+	      channels.bodyChunkReceived.publish({ request: this, chunk });
+	    }
+
+	    const controller = this[kController];
+	    try {
+	      this[kHandler].onResponseData?.(controller, chunk);
+	      return !controller?.paused
+	    } catch (err) {
+	      this.abort(err);
+	      return false
+	    }
 	  }
 
-	  onComplete (trailers) {
+	  onRequestUpgrade (statusCode, headers, socket) {
+	    assert(!this.aborted);
+	    assert(!this.completed);
+
+	    const controller = this[kController];
+	    if (controller) {
+	      controller.rawHeaders = headers;
+	    }
+
+	    const parsedHeaders = Array.isArray(headers) ? parseHeaders(headers) : headers;
+
+	    return this[kHandler].onRequestUpgrade?.(controller, statusCode, parsedHeaders, socket)
+	  }
+
+	  onResponseEnd (trailers) {
 	    this.onFinally();
 
 	    assert(!this.aborted);
@@ -3375,15 +3472,22 @@ function requireRequest$1 () {
 	      channels.trailers.publish({ request: this, trailers });
 	    }
 
+	    const controller = this[kController];
+	    if (controller) {
+	      controller.rawTrailers = trailers;
+	    }
+
+	    const parsedTrailers = Array.isArray(trailers) ? parseHeaders(trailers) : trailers;
+
 	    try {
-	      return this[kHandler].onComplete(trailers)
+	      return this[kHandler].onResponseEnd?.(controller, parsedTrailers)
 	    } catch (err) {
 	      // TODO (fix): This might be a bad idea?
-	      this.onError(err);
+	      this.onResponseError(err);
 	    }
 	  }
 
-	  onError (error) {
+	  onResponseError (error) {
 	    this.onFinally();
 
 	    if (channels.error.hasSubscribers) {
@@ -3395,7 +3499,9 @@ function requireRequest$1 () {
 	    }
 	    this.aborted = true;
 
-	    return this[kHandler].onError(error)
+	    const controller = this[kController];
+
+	    return this[kHandler].onResponseError?.(controller, error)
 	  }
 
 	  onFinally () {
@@ -3482,13 +3588,21 @@ function requireRequest$1 () {
 	  } else if (headerName === 'transfer-encoding' || headerName === 'keep-alive' || headerName === 'upgrade') {
 	    throw new InvalidArgumentError(`invalid ${headerName} header`)
 	  } else if (headerName === 'connection') {
-	    const value = typeof val === 'string' ? val.toLowerCase() : null;
-	    if (value !== 'close' && value !== 'keep-alive') {
+	    // Per RFC 7230 Section 6.1, Connection header can contain
+	    // a comma-separated list of connection option tokens (header names)
+	    const value = typeof val === 'string' ? val : null;
+	    if (value === null) {
 	      throw new InvalidArgumentError('invalid connection header')
 	    }
 
-	    if (value === 'close') {
-	      request.reset = true;
+	    for (const token of value.toLowerCase().split(',')) {
+	      const trimmed = token.trim();
+	      if (!isValidHTTPToken(trimmed)) {
+	        throw new InvalidArgumentError('invalid connection header')
+	      }
+	      if (trimmed === 'close') {
+	        request.reset = true;
+	      }
 	    }
 	  } else if (headerName === 'expect') {
 	    throw new NotSupportedError('expect header not supported')
@@ -3501,119 +3615,6 @@ function requireRequest$1 () {
 	return request$1;
 }
 
-var wrapHandler;
-var hasRequiredWrapHandler;
-
-function requireWrapHandler () {
-	if (hasRequiredWrapHandler) return wrapHandler;
-	hasRequiredWrapHandler = 1;
-
-	const { InvalidArgumentError } = requireErrors();
-
-	wrapHandler = class WrapHandler {
-	  #handler
-
-	  constructor (handler) {
-	    this.#handler = handler;
-	  }
-
-	  static wrap (handler) {
-	    // TODO (fix): More checks...
-	    return handler.onRequestStart ? handler : new WrapHandler(handler)
-	  }
-
-	  // Unwrap Interface
-
-	  onConnect (abort, context) {
-	    return this.#handler.onConnect?.(abort, context)
-	  }
-
-	  onResponseStarted () {
-	    return this.#handler.onResponseStarted?.()
-	  }
-
-	  onHeaders (statusCode, rawHeaders, resume, statusMessage) {
-	    return this.#handler.onHeaders?.(statusCode, rawHeaders, resume, statusMessage)
-	  }
-
-	  onUpgrade (statusCode, rawHeaders, socket) {
-	    return this.#handler.onUpgrade?.(statusCode, rawHeaders, socket)
-	  }
-
-	  onData (data) {
-	    return this.#handler.onData?.(data)
-	  }
-
-	  onComplete (trailers) {
-	    return this.#handler.onComplete?.(trailers)
-	  }
-
-	  onError (err) {
-	    if (!this.#handler.onError) {
-	      throw err
-	    }
-
-	    return this.#handler.onError?.(err)
-	  }
-
-	  // Wrap Interface
-
-	  onRequestStart (controller, context) {
-	    this.#handler.onConnect?.((reason) => controller.abort(reason), context);
-	  }
-
-	  onRequestUpgrade (controller, statusCode, headers, socket) {
-	    const rawHeaders = [];
-	    for (const [key, val] of Object.entries(headers)) {
-	      rawHeaders.push(Buffer.from(key, 'latin1'), toRawHeaderValue(val));
-	    }
-
-	    this.#handler.onUpgrade?.(statusCode, rawHeaders, socket);
-	  }
-
-	  onResponseStart (controller, statusCode, headers, statusMessage) {
-	    const rawHeaders = [];
-	    for (const [key, val] of Object.entries(headers)) {
-	      rawHeaders.push(Buffer.from(key, 'latin1'), toRawHeaderValue(val));
-	    }
-
-	    if (this.#handler.onHeaders?.(statusCode, rawHeaders, () => controller.resume(), statusMessage) === false) {
-	      controller.pause();
-	    }
-	  }
-
-	  onResponseData (controller, data) {
-	    if (this.#handler.onData?.(data) === false) {
-	      controller.pause();
-	    }
-	  }
-
-	  onResponseEnd (controller, trailers) {
-	    const rawTrailers = [];
-	    for (const [key, val] of Object.entries(trailers)) {
-	      rawTrailers.push(Buffer.from(key, 'latin1'), toRawHeaderValue(val));
-	    }
-
-	    this.#handler.onComplete?.(rawTrailers);
-	  }
-
-	  onResponseError (controller, err) {
-	    if (!this.#handler.onError) {
-	      throw new InvalidArgumentError('invalid onError method')
-	    }
-
-	    this.#handler.onError?.(err);
-	  }
-	};
-
-	function toRawHeaderValue (value) {
-	  return Array.isArray(value)
-	    ? value.map((item) => Buffer.from(item, 'latin1'))
-	    : Buffer.from(value, 'latin1')
-	}
-	return wrapHandler;
-}
-
 var dispatcher;
 var hasRequiredDispatcher;
 
@@ -3621,9 +3622,6 @@ function requireDispatcher () {
 	if (hasRequiredDispatcher) return dispatcher;
 	hasRequiredDispatcher = 1;
 	const EventEmitter = require$$0;
-	const WrapHandler = requireWrapHandler();
-
-	const wrapInterceptor = (dispatch) => (opts, handler) => dispatch(opts, WrapHandler.wrap(handler));
 
 	class Dispatcher extends EventEmitter {
 	  dispatch () {
@@ -3653,7 +3651,6 @@ function requireDispatcher () {
 	      }
 
 	      dispatch = interceptor(dispatch);
-	      dispatch = wrapInterceptor(dispatch);
 
 	      if (dispatch == null || typeof dispatch !== 'function' || dispatch.length !== 2) {
 	        throw new TypeError('invalid interceptor')
@@ -3670,114 +3667,6 @@ function requireDispatcher () {
 	return dispatcher;
 }
 
-var unwrapHandler;
-var hasRequiredUnwrapHandler;
-
-function requireUnwrapHandler () {
-	if (hasRequiredUnwrapHandler) return unwrapHandler;
-	hasRequiredUnwrapHandler = 1;
-
-	const { parseHeaders } = requireUtil$5();
-	const { InvalidArgumentError } = requireErrors();
-
-	const kResume = Symbol('resume');
-
-	class UnwrapController {
-	  #paused = false
-	  #reason = null
-	  #aborted = false
-	  #abort
-
-	  [kResume] = null
-
-	  constructor (abort) {
-	    this.#abort = abort;
-	  }
-
-	  pause () {
-	    this.#paused = true;
-	  }
-
-	  resume () {
-	    if (this.#paused) {
-	      this.#paused = false;
-	      this[kResume]?.();
-	    }
-	  }
-
-	  abort (reason) {
-	    if (!this.#aborted) {
-	      this.#aborted = true;
-	      this.#reason = reason;
-	      this.#abort(reason);
-	    }
-	  }
-
-	  get aborted () {
-	    return this.#aborted
-	  }
-
-	  get reason () {
-	    return this.#reason
-	  }
-
-	  get paused () {
-	    return this.#paused
-	  }
-	}
-
-	unwrapHandler = class UnwrapHandler {
-	  #handler
-	  #controller
-
-	  constructor (handler) {
-	    this.#handler = handler;
-	  }
-
-	  static unwrap (handler) {
-	    // TODO (fix): More checks...
-	    return !handler.onRequestStart ? handler : new UnwrapHandler(handler)
-	  }
-
-	  onConnect (abort, context) {
-	    this.#controller = new UnwrapController(abort);
-	    this.#handler.onRequestStart?.(this.#controller, context);
-	  }
-
-	  onResponseStarted () {
-	    return this.#handler.onResponseStarted?.()
-	  }
-
-	  onUpgrade (statusCode, rawHeaders, socket) {
-	    this.#handler.onRequestUpgrade?.(this.#controller, statusCode, parseHeaders(rawHeaders), socket);
-	  }
-
-	  onHeaders (statusCode, rawHeaders, resume, statusMessage) {
-	    this.#controller[kResume] = resume;
-	    this.#handler.onResponseStart?.(this.#controller, statusCode, parseHeaders(rawHeaders), statusMessage);
-	    return !this.#controller.paused
-	  }
-
-	  onData (data) {
-	    this.#handler.onResponseData?.(this.#controller, data);
-	    return !this.#controller.paused
-	  }
-
-	  onComplete (rawTrailers) {
-	    this.#handler.onResponseEnd?.(this.#controller, parseHeaders(rawTrailers));
-	  }
-
-	  onError (err) {
-	    if (!this.#handler.onResponseError) {
-	      throw new InvalidArgumentError('invalid onError method')
-	    }
-
-	    this.#handler.onResponseError?.(this.#controller, err);
-	  }
-	};
-	return unwrapHandler;
-}
-
 var dispatcherBase;
 var hasRequiredDispatcherBase;
 
@@ -3786,7 +3675,6 @@ function requireDispatcherBase () {
 	hasRequiredDispatcherBase = 1;
 
 	const Dispatcher = requireDispatcher();
-	const UnwrapHandler = requireUnwrapHandler();
 	const {
 	  ClientDestroyedError,
 	  ClientClosedError,
@@ -3796,6 +3684,7 @@ function requireDispatcherBase () {
 
 	const kOnDestroyed = Symbol('onDestroyed');
 	const kOnClosed = Symbol('onClosed');
+	const kWebSocketOptions = Symbol('webSocketOptions');
 
 	class DispatcherBase extends Dispatcher {
 	  /** @type {boolean} */
@@ -3809,6 +3698,23 @@ function requireDispatcherBase () {
 
 	  /** @type {Array<Function>|null} */
 	  [kOnClosed] = null
+
+	  /**
+	   * @param {import('../../types/dispatcher').DispatcherOptions} [opts]
+	   */
+	  constructor (opts) {
+	    super();
+	    this[kWebSocketOptions] = opts?.webSocket ?? {};
+	  }
+
+	  /**
+	   * @returns {import('../../types/dispatcher').WebSocketOptions}
+	   */
+	  get webSocketOptions () {
+	    return {
+	      maxPayloadSize: this[kWebSocketOptions].maxPayloadSize ?? 128 * 1024 * 1024 // 128 MB default
+	    }
+	  }
 
 	  /** @returns {boolean} */
 	  get destroyed () {
@@ -3919,11 +3825,13 @@ function requireDispatcherBase () {
 	      throw new InvalidArgumentError('handler must be an object')
 	    }
 
-	    handler = UnwrapHandler.unwrap(handler);
-
 	    try {
 	      if (!opts || typeof opts !== 'object') {
 	        throw new InvalidArgumentError('opts must be an object.')
+	      }
+
+	      if (opts.dispatcher) {
+	        throw new InvalidArgumentError('opts.dispatcher is not supported by instance methods. Pass opts.dispatcher to the top-level undici functions or call the dispatcher instance method directly.')
 	      }
 
 	      if (this[kDestroyed] || this[kOnDestroyed]) {
@@ -3936,11 +3844,11 @@ function requireDispatcherBase () {
 
 	      return this[kDispatch](opts, handler)
 	    } catch (err) {
-	      if (typeof handler.onError !== 'function') {
+	      if (typeof handler.onResponseError !== 'function') {
 	        throw err
 	      }
 
-	      handler.onError(err);
+	      handler.onResponseError(null, err);
 
 	      return false
 	    }
@@ -4009,7 +3917,7 @@ function requireConnect () {
 	  const options = { path: socketPath, ...opts };
 	  const sessionCache = new SessionCache(maxCachedSessions == null ? 100 : maxCachedSessions);
 	  timeout = timeout == null ? 10e3 : timeout;
-	  allowH2 = allowH2 != null ? allowH2 : false;
+	  allowH2 = allowH2 != null ? allowH2 : true;
 	  return function connect ({ hostname, host, protocol, port, servername, localAddress, httpSocket }, callback) {
 	    let socket;
 	    if (protocol === 'https:') {
@@ -4124,12 +4032,12 @@ var hasRequiredConstants$3;
 function requireConstants$3 () {
 	if (hasRequiredConstants$3) return constants$3;
 	hasRequiredConstants$3 = 1;
-	(function (exports$1) {
-		Object.defineProperty(exports$1, "__esModule", { value: true });
-		exports$1.SPECIAL_HEADERS = exports$1.MINOR = exports$1.MAJOR = exports$1.HTAB_SP_VCHAR_OBS_TEXT = exports$1.QUOTED_STRING = exports$1.CONNECTION_TOKEN_CHARS = exports$1.HEADER_CHARS = exports$1.TOKEN = exports$1.HEX = exports$1.URL_CHAR = exports$1.USERINFO_CHARS = exports$1.MARK = exports$1.ALPHANUM = exports$1.NUM = exports$1.HEX_MAP = exports$1.NUM_MAP = exports$1.ALPHA = exports$1.STATUSES_HTTP = exports$1.H_METHOD_MAP = exports$1.METHOD_MAP = exports$1.METHODS_RTSP = exports$1.METHODS_ICE = exports$1.METHODS_HTTP = exports$1.HEADER_STATE = exports$1.FINISH = exports$1.STATUSES = exports$1.METHODS = exports$1.LENIENT_FLAGS = exports$1.FLAGS = exports$1.TYPE = exports$1.ERROR = void 0;
+	(function (exports) {
+		Object.defineProperty(exports, "__esModule", { value: true });
+		exports.SPECIAL_HEADERS = exports.MINOR = exports.MAJOR = exports.HTAB_SP_VCHAR_OBS_TEXT = exports.QUOTED_STRING = exports.CONNECTION_TOKEN_CHARS = exports.HEADER_CHARS = exports.TOKEN = exports.HEX = exports.URL_CHAR = exports.USERINFO_CHARS = exports.MARK = exports.ALPHANUM = exports.NUM = exports.HEX_MAP = exports.NUM_MAP = exports.ALPHA = exports.STATUSES_HTTP = exports.H_METHOD_MAP = exports.METHOD_MAP = exports.METHODS_RTSP = exports.METHODS_ICE = exports.METHODS_HTTP = exports.HEADER_STATE = exports.FINISH = exports.STATUSES = exports.METHODS = exports.LENIENT_FLAGS = exports.FLAGS = exports.TYPE = exports.ERROR = void 0;
 		const utils_1 = requireUtils();
 		// Emums
-		exports$1.ERROR = {
+		exports.ERROR = {
 		    OK: 0,
 		    INTERNAL: 1,
 		    STRICT: 2,
@@ -4168,12 +4076,12 @@ function requireConstants$3 () {
 		    CB_RESET: 31,
 		    CB_PROTOCOL_COMPLETE: 38,
 		};
-		exports$1.TYPE = {
+		exports.TYPE = {
 		    BOTH: 0, // default
 		    REQUEST: 1,
 		    RESPONSE: 2,
 		};
-		exports$1.FLAGS = {
+		exports.FLAGS = {
 		    CONNECTION_KEEP_ALIVE: 1 << 0,
 		    CONNECTION_CLOSE: 1 << 1,
 		    CONNECTION_UPGRADE: 1 << 2,
@@ -4185,7 +4093,7 @@ function requireConstants$3 () {
 		    // 1 << 8 is unused
 		    TRANSFER_ENCODING: 1 << 9,
 		};
-		exports$1.LENIENT_FLAGS = {
+		exports.LENIENT_FLAGS = {
 		    HEADERS: 1 << 0,
 		    CHUNKED_LENGTH: 1 << 1,
 		    KEEP_ALIVE: 1 << 2,
@@ -4197,7 +4105,7 @@ function requireConstants$3 () {
 		    OPTIONAL_CR_BEFORE_LF: 1 << 8,
 		    SPACES_AFTER_CHUNK_SIZE: 1 << 9,
 		};
-		exports$1.METHODS = {
+		exports.METHODS = {
 		    'DELETE': 0,
 		    'GET': 1,
 		    'HEAD': 2,
@@ -4258,7 +4166,7 @@ function requireConstants$3 () {
 		    /* DRAFT https://www.ietf.org/archive/id/draft-ietf-httpbis-safe-method-w-body-02.html */
 		    'QUERY': 46,
 		};
-		exports$1.STATUSES = {
+		exports.STATUSES = {
 		    CONTINUE: 100,
 		    SWITCHING_PROTOCOLS: 101,
 		    PROCESSING: 102,
@@ -4359,12 +4267,12 @@ function requireConstants$3 () {
 		    NETWORK_READ_TIMEOUT: 598, // Unofficial
 		    NETWORK_CONNECT_TIMEOUT: 599, // Unofficial
 		};
-		exports$1.FINISH = {
+		exports.FINISH = {
 		    SAFE: 0,
 		    SAFE_WITH_CB: 1,
 		    UNSAFE: 2,
 		};
-		exports$1.HEADER_STATE = {
+		exports.HEADER_STATE = {
 		    GENERAL: 0,
 		    CONNECTION: 1,
 		    CONTENT_LENGTH: 2,
@@ -4376,203 +4284,203 @@ function requireConstants$3 () {
 		    TRANSFER_ENCODING_CHUNKED: 8,
 		};
 		// C headers
-		exports$1.METHODS_HTTP = [
-		    exports$1.METHODS.DELETE,
-		    exports$1.METHODS.GET,
-		    exports$1.METHODS.HEAD,
-		    exports$1.METHODS.POST,
-		    exports$1.METHODS.PUT,
-		    exports$1.METHODS.CONNECT,
-		    exports$1.METHODS.OPTIONS,
-		    exports$1.METHODS.TRACE,
-		    exports$1.METHODS.COPY,
-		    exports$1.METHODS.LOCK,
-		    exports$1.METHODS.MKCOL,
-		    exports$1.METHODS.MOVE,
-		    exports$1.METHODS.PROPFIND,
-		    exports$1.METHODS.PROPPATCH,
-		    exports$1.METHODS.SEARCH,
-		    exports$1.METHODS.UNLOCK,
-		    exports$1.METHODS.BIND,
-		    exports$1.METHODS.REBIND,
-		    exports$1.METHODS.UNBIND,
-		    exports$1.METHODS.ACL,
-		    exports$1.METHODS.REPORT,
-		    exports$1.METHODS.MKACTIVITY,
-		    exports$1.METHODS.CHECKOUT,
-		    exports$1.METHODS.MERGE,
-		    exports$1.METHODS['M-SEARCH'],
-		    exports$1.METHODS.NOTIFY,
-		    exports$1.METHODS.SUBSCRIBE,
-		    exports$1.METHODS.UNSUBSCRIBE,
-		    exports$1.METHODS.PATCH,
-		    exports$1.METHODS.PURGE,
-		    exports$1.METHODS.MKCALENDAR,
-		    exports$1.METHODS.LINK,
-		    exports$1.METHODS.UNLINK,
-		    exports$1.METHODS.PRI,
+		exports.METHODS_HTTP = [
+		    exports.METHODS.DELETE,
+		    exports.METHODS.GET,
+		    exports.METHODS.HEAD,
+		    exports.METHODS.POST,
+		    exports.METHODS.PUT,
+		    exports.METHODS.CONNECT,
+		    exports.METHODS.OPTIONS,
+		    exports.METHODS.TRACE,
+		    exports.METHODS.COPY,
+		    exports.METHODS.LOCK,
+		    exports.METHODS.MKCOL,
+		    exports.METHODS.MOVE,
+		    exports.METHODS.PROPFIND,
+		    exports.METHODS.PROPPATCH,
+		    exports.METHODS.SEARCH,
+		    exports.METHODS.UNLOCK,
+		    exports.METHODS.BIND,
+		    exports.METHODS.REBIND,
+		    exports.METHODS.UNBIND,
+		    exports.METHODS.ACL,
+		    exports.METHODS.REPORT,
+		    exports.METHODS.MKACTIVITY,
+		    exports.METHODS.CHECKOUT,
+		    exports.METHODS.MERGE,
+		    exports.METHODS['M-SEARCH'],
+		    exports.METHODS.NOTIFY,
+		    exports.METHODS.SUBSCRIBE,
+		    exports.METHODS.UNSUBSCRIBE,
+		    exports.METHODS.PATCH,
+		    exports.METHODS.PURGE,
+		    exports.METHODS.MKCALENDAR,
+		    exports.METHODS.LINK,
+		    exports.METHODS.UNLINK,
+		    exports.METHODS.PRI,
 		    // TODO(indutny): should we allow it with HTTP?
-		    exports$1.METHODS.SOURCE,
-		    exports$1.METHODS.QUERY,
+		    exports.METHODS.SOURCE,
+		    exports.METHODS.QUERY,
 		];
-		exports$1.METHODS_ICE = [
-		    exports$1.METHODS.SOURCE,
+		exports.METHODS_ICE = [
+		    exports.METHODS.SOURCE,
 		];
-		exports$1.METHODS_RTSP = [
-		    exports$1.METHODS.OPTIONS,
-		    exports$1.METHODS.DESCRIBE,
-		    exports$1.METHODS.ANNOUNCE,
-		    exports$1.METHODS.SETUP,
-		    exports$1.METHODS.PLAY,
-		    exports$1.METHODS.PAUSE,
-		    exports$1.METHODS.TEARDOWN,
-		    exports$1.METHODS.GET_PARAMETER,
-		    exports$1.METHODS.SET_PARAMETER,
-		    exports$1.METHODS.REDIRECT,
-		    exports$1.METHODS.RECORD,
-		    exports$1.METHODS.FLUSH,
+		exports.METHODS_RTSP = [
+		    exports.METHODS.OPTIONS,
+		    exports.METHODS.DESCRIBE,
+		    exports.METHODS.ANNOUNCE,
+		    exports.METHODS.SETUP,
+		    exports.METHODS.PLAY,
+		    exports.METHODS.PAUSE,
+		    exports.METHODS.TEARDOWN,
+		    exports.METHODS.GET_PARAMETER,
+		    exports.METHODS.SET_PARAMETER,
+		    exports.METHODS.REDIRECT,
+		    exports.METHODS.RECORD,
+		    exports.METHODS.FLUSH,
 		    // For AirPlay
-		    exports$1.METHODS.GET,
-		    exports$1.METHODS.POST,
+		    exports.METHODS.GET,
+		    exports.METHODS.POST,
 		];
-		exports$1.METHOD_MAP = (0, utils_1.enumToMap)(exports$1.METHODS);
-		exports$1.H_METHOD_MAP = Object.fromEntries(Object.entries(exports$1.METHODS).filter(([k]) => k.startsWith('H')));
-		exports$1.STATUSES_HTTP = [
-		    exports$1.STATUSES.CONTINUE,
-		    exports$1.STATUSES.SWITCHING_PROTOCOLS,
-		    exports$1.STATUSES.PROCESSING,
-		    exports$1.STATUSES.EARLY_HINTS,
-		    exports$1.STATUSES.RESPONSE_IS_STALE,
-		    exports$1.STATUSES.REVALIDATION_FAILED,
-		    exports$1.STATUSES.DISCONNECTED_OPERATION,
-		    exports$1.STATUSES.HEURISTIC_EXPIRATION,
-		    exports$1.STATUSES.MISCELLANEOUS_WARNING,
-		    exports$1.STATUSES.OK,
-		    exports$1.STATUSES.CREATED,
-		    exports$1.STATUSES.ACCEPTED,
-		    exports$1.STATUSES.NON_AUTHORITATIVE_INFORMATION,
-		    exports$1.STATUSES.NO_CONTENT,
-		    exports$1.STATUSES.RESET_CONTENT,
-		    exports$1.STATUSES.PARTIAL_CONTENT,
-		    exports$1.STATUSES.MULTI_STATUS,
-		    exports$1.STATUSES.ALREADY_REPORTED,
-		    exports$1.STATUSES.TRANSFORMATION_APPLIED,
-		    exports$1.STATUSES.IM_USED,
-		    exports$1.STATUSES.MISCELLANEOUS_PERSISTENT_WARNING,
-		    exports$1.STATUSES.MULTIPLE_CHOICES,
-		    exports$1.STATUSES.MOVED_PERMANENTLY,
-		    exports$1.STATUSES.FOUND,
-		    exports$1.STATUSES.SEE_OTHER,
-		    exports$1.STATUSES.NOT_MODIFIED,
-		    exports$1.STATUSES.USE_PROXY,
-		    exports$1.STATUSES.SWITCH_PROXY,
-		    exports$1.STATUSES.TEMPORARY_REDIRECT,
-		    exports$1.STATUSES.PERMANENT_REDIRECT,
-		    exports$1.STATUSES.BAD_REQUEST,
-		    exports$1.STATUSES.UNAUTHORIZED,
-		    exports$1.STATUSES.PAYMENT_REQUIRED,
-		    exports$1.STATUSES.FORBIDDEN,
-		    exports$1.STATUSES.NOT_FOUND,
-		    exports$1.STATUSES.METHOD_NOT_ALLOWED,
-		    exports$1.STATUSES.NOT_ACCEPTABLE,
-		    exports$1.STATUSES.PROXY_AUTHENTICATION_REQUIRED,
-		    exports$1.STATUSES.REQUEST_TIMEOUT,
-		    exports$1.STATUSES.CONFLICT,
-		    exports$1.STATUSES.GONE,
-		    exports$1.STATUSES.LENGTH_REQUIRED,
-		    exports$1.STATUSES.PRECONDITION_FAILED,
-		    exports$1.STATUSES.PAYLOAD_TOO_LARGE,
-		    exports$1.STATUSES.URI_TOO_LONG,
-		    exports$1.STATUSES.UNSUPPORTED_MEDIA_TYPE,
-		    exports$1.STATUSES.RANGE_NOT_SATISFIABLE,
-		    exports$1.STATUSES.EXPECTATION_FAILED,
-		    exports$1.STATUSES.IM_A_TEAPOT,
-		    exports$1.STATUSES.PAGE_EXPIRED,
-		    exports$1.STATUSES.ENHANCE_YOUR_CALM,
-		    exports$1.STATUSES.MISDIRECTED_REQUEST,
-		    exports$1.STATUSES.UNPROCESSABLE_ENTITY,
-		    exports$1.STATUSES.LOCKED,
-		    exports$1.STATUSES.FAILED_DEPENDENCY,
-		    exports$1.STATUSES.TOO_EARLY,
-		    exports$1.STATUSES.UPGRADE_REQUIRED,
-		    exports$1.STATUSES.PRECONDITION_REQUIRED,
-		    exports$1.STATUSES.TOO_MANY_REQUESTS,
-		    exports$1.STATUSES.REQUEST_HEADER_FIELDS_TOO_LARGE_UNOFFICIAL,
-		    exports$1.STATUSES.REQUEST_HEADER_FIELDS_TOO_LARGE,
-		    exports$1.STATUSES.LOGIN_TIMEOUT,
-		    exports$1.STATUSES.NO_RESPONSE,
-		    exports$1.STATUSES.RETRY_WITH,
-		    exports$1.STATUSES.BLOCKED_BY_PARENTAL_CONTROL,
-		    exports$1.STATUSES.UNAVAILABLE_FOR_LEGAL_REASONS,
-		    exports$1.STATUSES.CLIENT_CLOSED_LOAD_BALANCED_REQUEST,
-		    exports$1.STATUSES.INVALID_X_FORWARDED_FOR,
-		    exports$1.STATUSES.REQUEST_HEADER_TOO_LARGE,
-		    exports$1.STATUSES.SSL_CERTIFICATE_ERROR,
-		    exports$1.STATUSES.SSL_CERTIFICATE_REQUIRED,
-		    exports$1.STATUSES.HTTP_REQUEST_SENT_TO_HTTPS_PORT,
-		    exports$1.STATUSES.INVALID_TOKEN,
-		    exports$1.STATUSES.CLIENT_CLOSED_REQUEST,
-		    exports$1.STATUSES.INTERNAL_SERVER_ERROR,
-		    exports$1.STATUSES.NOT_IMPLEMENTED,
-		    exports$1.STATUSES.BAD_GATEWAY,
-		    exports$1.STATUSES.SERVICE_UNAVAILABLE,
-		    exports$1.STATUSES.GATEWAY_TIMEOUT,
-		    exports$1.STATUSES.HTTP_VERSION_NOT_SUPPORTED,
-		    exports$1.STATUSES.VARIANT_ALSO_NEGOTIATES,
-		    exports$1.STATUSES.INSUFFICIENT_STORAGE,
-		    exports$1.STATUSES.LOOP_DETECTED,
-		    exports$1.STATUSES.BANDWIDTH_LIMIT_EXCEEDED,
-		    exports$1.STATUSES.NOT_EXTENDED,
-		    exports$1.STATUSES.NETWORK_AUTHENTICATION_REQUIRED,
-		    exports$1.STATUSES.WEB_SERVER_UNKNOWN_ERROR,
-		    exports$1.STATUSES.WEB_SERVER_IS_DOWN,
-		    exports$1.STATUSES.CONNECTION_TIMEOUT,
-		    exports$1.STATUSES.ORIGIN_IS_UNREACHABLE,
-		    exports$1.STATUSES.TIMEOUT_OCCURED,
-		    exports$1.STATUSES.SSL_HANDSHAKE_FAILED,
-		    exports$1.STATUSES.INVALID_SSL_CERTIFICATE,
-		    exports$1.STATUSES.RAILGUN_ERROR,
-		    exports$1.STATUSES.SITE_IS_OVERLOADED,
-		    exports$1.STATUSES.SITE_IS_FROZEN,
-		    exports$1.STATUSES.IDENTITY_PROVIDER_AUTHENTICATION_ERROR,
-		    exports$1.STATUSES.NETWORK_READ_TIMEOUT,
-		    exports$1.STATUSES.NETWORK_CONNECT_TIMEOUT,
+		exports.METHOD_MAP = (0, utils_1.enumToMap)(exports.METHODS);
+		exports.H_METHOD_MAP = Object.fromEntries(Object.entries(exports.METHODS).filter(([k]) => k.startsWith('H')));
+		exports.STATUSES_HTTP = [
+		    exports.STATUSES.CONTINUE,
+		    exports.STATUSES.SWITCHING_PROTOCOLS,
+		    exports.STATUSES.PROCESSING,
+		    exports.STATUSES.EARLY_HINTS,
+		    exports.STATUSES.RESPONSE_IS_STALE,
+		    exports.STATUSES.REVALIDATION_FAILED,
+		    exports.STATUSES.DISCONNECTED_OPERATION,
+		    exports.STATUSES.HEURISTIC_EXPIRATION,
+		    exports.STATUSES.MISCELLANEOUS_WARNING,
+		    exports.STATUSES.OK,
+		    exports.STATUSES.CREATED,
+		    exports.STATUSES.ACCEPTED,
+		    exports.STATUSES.NON_AUTHORITATIVE_INFORMATION,
+		    exports.STATUSES.NO_CONTENT,
+		    exports.STATUSES.RESET_CONTENT,
+		    exports.STATUSES.PARTIAL_CONTENT,
+		    exports.STATUSES.MULTI_STATUS,
+		    exports.STATUSES.ALREADY_REPORTED,
+		    exports.STATUSES.TRANSFORMATION_APPLIED,
+		    exports.STATUSES.IM_USED,
+		    exports.STATUSES.MISCELLANEOUS_PERSISTENT_WARNING,
+		    exports.STATUSES.MULTIPLE_CHOICES,
+		    exports.STATUSES.MOVED_PERMANENTLY,
+		    exports.STATUSES.FOUND,
+		    exports.STATUSES.SEE_OTHER,
+		    exports.STATUSES.NOT_MODIFIED,
+		    exports.STATUSES.USE_PROXY,
+		    exports.STATUSES.SWITCH_PROXY,
+		    exports.STATUSES.TEMPORARY_REDIRECT,
+		    exports.STATUSES.PERMANENT_REDIRECT,
+		    exports.STATUSES.BAD_REQUEST,
+		    exports.STATUSES.UNAUTHORIZED,
+		    exports.STATUSES.PAYMENT_REQUIRED,
+		    exports.STATUSES.FORBIDDEN,
+		    exports.STATUSES.NOT_FOUND,
+		    exports.STATUSES.METHOD_NOT_ALLOWED,
+		    exports.STATUSES.NOT_ACCEPTABLE,
+		    exports.STATUSES.PROXY_AUTHENTICATION_REQUIRED,
+		    exports.STATUSES.REQUEST_TIMEOUT,
+		    exports.STATUSES.CONFLICT,
+		    exports.STATUSES.GONE,
+		    exports.STATUSES.LENGTH_REQUIRED,
+		    exports.STATUSES.PRECONDITION_FAILED,
+		    exports.STATUSES.PAYLOAD_TOO_LARGE,
+		    exports.STATUSES.URI_TOO_LONG,
+		    exports.STATUSES.UNSUPPORTED_MEDIA_TYPE,
+		    exports.STATUSES.RANGE_NOT_SATISFIABLE,
+		    exports.STATUSES.EXPECTATION_FAILED,
+		    exports.STATUSES.IM_A_TEAPOT,
+		    exports.STATUSES.PAGE_EXPIRED,
+		    exports.STATUSES.ENHANCE_YOUR_CALM,
+		    exports.STATUSES.MISDIRECTED_REQUEST,
+		    exports.STATUSES.UNPROCESSABLE_ENTITY,
+		    exports.STATUSES.LOCKED,
+		    exports.STATUSES.FAILED_DEPENDENCY,
+		    exports.STATUSES.TOO_EARLY,
+		    exports.STATUSES.UPGRADE_REQUIRED,
+		    exports.STATUSES.PRECONDITION_REQUIRED,
+		    exports.STATUSES.TOO_MANY_REQUESTS,
+		    exports.STATUSES.REQUEST_HEADER_FIELDS_TOO_LARGE_UNOFFICIAL,
+		    exports.STATUSES.REQUEST_HEADER_FIELDS_TOO_LARGE,
+		    exports.STATUSES.LOGIN_TIMEOUT,
+		    exports.STATUSES.NO_RESPONSE,
+		    exports.STATUSES.RETRY_WITH,
+		    exports.STATUSES.BLOCKED_BY_PARENTAL_CONTROL,
+		    exports.STATUSES.UNAVAILABLE_FOR_LEGAL_REASONS,
+		    exports.STATUSES.CLIENT_CLOSED_LOAD_BALANCED_REQUEST,
+		    exports.STATUSES.INVALID_X_FORWARDED_FOR,
+		    exports.STATUSES.REQUEST_HEADER_TOO_LARGE,
+		    exports.STATUSES.SSL_CERTIFICATE_ERROR,
+		    exports.STATUSES.SSL_CERTIFICATE_REQUIRED,
+		    exports.STATUSES.HTTP_REQUEST_SENT_TO_HTTPS_PORT,
+		    exports.STATUSES.INVALID_TOKEN,
+		    exports.STATUSES.CLIENT_CLOSED_REQUEST,
+		    exports.STATUSES.INTERNAL_SERVER_ERROR,
+		    exports.STATUSES.NOT_IMPLEMENTED,
+		    exports.STATUSES.BAD_GATEWAY,
+		    exports.STATUSES.SERVICE_UNAVAILABLE,
+		    exports.STATUSES.GATEWAY_TIMEOUT,
+		    exports.STATUSES.HTTP_VERSION_NOT_SUPPORTED,
+		    exports.STATUSES.VARIANT_ALSO_NEGOTIATES,
+		    exports.STATUSES.INSUFFICIENT_STORAGE,
+		    exports.STATUSES.LOOP_DETECTED,
+		    exports.STATUSES.BANDWIDTH_LIMIT_EXCEEDED,
+		    exports.STATUSES.NOT_EXTENDED,
+		    exports.STATUSES.NETWORK_AUTHENTICATION_REQUIRED,
+		    exports.STATUSES.WEB_SERVER_UNKNOWN_ERROR,
+		    exports.STATUSES.WEB_SERVER_IS_DOWN,
+		    exports.STATUSES.CONNECTION_TIMEOUT,
+		    exports.STATUSES.ORIGIN_IS_UNREACHABLE,
+		    exports.STATUSES.TIMEOUT_OCCURED,
+		    exports.STATUSES.SSL_HANDSHAKE_FAILED,
+		    exports.STATUSES.INVALID_SSL_CERTIFICATE,
+		    exports.STATUSES.RAILGUN_ERROR,
+		    exports.STATUSES.SITE_IS_OVERLOADED,
+		    exports.STATUSES.SITE_IS_FROZEN,
+		    exports.STATUSES.IDENTITY_PROVIDER_AUTHENTICATION_ERROR,
+		    exports.STATUSES.NETWORK_READ_TIMEOUT,
+		    exports.STATUSES.NETWORK_CONNECT_TIMEOUT,
 		];
-		exports$1.ALPHA = [];
+		exports.ALPHA = [];
 		for (let i = 'A'.charCodeAt(0); i <= 'Z'.charCodeAt(0); i++) {
 		    // Upper case
-		    exports$1.ALPHA.push(String.fromCharCode(i));
+		    exports.ALPHA.push(String.fromCharCode(i));
 		    // Lower case
-		    exports$1.ALPHA.push(String.fromCharCode(i + 0x20));
+		    exports.ALPHA.push(String.fromCharCode(i + 0x20));
 		}
-		exports$1.NUM_MAP = {
+		exports.NUM_MAP = {
 		    0: 0, 1: 1, 2: 2, 3: 3, 4: 4,
 		    5: 5, 6: 6, 7: 7, 8: 8, 9: 9,
 		};
-		exports$1.HEX_MAP = {
+		exports.HEX_MAP = {
 		    0: 0, 1: 1, 2: 2, 3: 3, 4: 4,
 		    5: 5, 6: 6, 7: 7, 8: 8, 9: 9,
 		    A: 0XA, B: 0XB, C: 0XC, D: 0XD, E: 0XE, F: 0XF,
 		    a: 0xa, b: 0xb, c: 0xc, d: 0xd, e: 0xe, f: 0xf,
 		};
-		exports$1.NUM = [
+		exports.NUM = [
 		    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
 		];
-		exports$1.ALPHANUM = exports$1.ALPHA.concat(exports$1.NUM);
-		exports$1.MARK = ['-', '_', '.', '!', '~', '*', '\'', '(', ')'];
-		exports$1.USERINFO_CHARS = exports$1.ALPHANUM
-		    .concat(exports$1.MARK)
+		exports.ALPHANUM = exports.ALPHA.concat(exports.NUM);
+		exports.MARK = ['-', '_', '.', '!', '~', '*', '\'', '(', ')'];
+		exports.USERINFO_CHARS = exports.ALPHANUM
+		    .concat(exports.MARK)
 		    .concat(['%', ';', ':', '&', '=', '+', '$', ',']);
 		// TODO(indutny): use RFC
-		exports$1.URL_CHAR = [
+		exports.URL_CHAR = [
 		    '!', '"', '$', '%', '&', '\'',
 		    '(', ')', '*', '+', ',', '-', '.', '/',
 		    ':', ';', '<', '=', '>',
 		    '@', '[', '\\', ']', '^', '_',
 		    '`',
 		    '{', '|', '}', '~',
-		].concat(exports$1.ALPHANUM);
-		exports$1.HEX = exports$1.NUM.concat(['a', 'b', 'c', 'd', 'e', 'f', 'A', 'B', 'C', 'D', 'E', 'F']);
+		].concat(exports.ALPHANUM);
+		exports.HEX = exports.NUM.concat(['a', 'b', 'c', 'd', 'e', 'f', 'A', 'B', 'C', 'D', 'E', 'F']);
 		/* Tokens as defined by rfc 2616. Also lowercases them.
 		 *        token       = 1*<any CHAR except CTLs or separators>
 		 *     separators     = "(" | ")" | "<" | ">" | "@"
@@ -4580,80 +4488,80 @@ function requireConstants$3 () {
 		 *                    | "/" | "[" | "]" | "?" | "="
 		 *                    | "{" | "}" | SP | HT
 		 */
-		exports$1.TOKEN = [
+		exports.TOKEN = [
 		    '!', '#', '$', '%', '&', '\'',
 		    '*', '+', '-', '.',
 		    '^', '_', '`',
 		    '|', '~',
-		].concat(exports$1.ALPHANUM);
+		].concat(exports.ALPHANUM);
 		/*
 		 * Verify that a char is a valid visible (printable) US-ASCII
 		 * character or %x80-FF
 		 */
-		exports$1.HEADER_CHARS = ['\t'];
+		exports.HEADER_CHARS = ['\t'];
 		for (let i = 32; i <= 255; i++) {
 		    if (i !== 127) {
-		        exports$1.HEADER_CHARS.push(i);
+		        exports.HEADER_CHARS.push(i);
 		    }
 		}
 		// ',' = \x44
-		exports$1.CONNECTION_TOKEN_CHARS = exports$1.HEADER_CHARS.filter((c) => c !== 44);
-		exports$1.QUOTED_STRING = ['\t', ' '];
+		exports.CONNECTION_TOKEN_CHARS = exports.HEADER_CHARS.filter((c) => c !== 44);
+		exports.QUOTED_STRING = ['\t', ' '];
 		for (let i = 0x21; i <= 0xff; i++) {
 		    if (i !== 0x22 && i !== 0x5c) { // All characters in ASCII except \ and "
-		        exports$1.QUOTED_STRING.push(i);
+		        exports.QUOTED_STRING.push(i);
 		    }
 		}
-		exports$1.HTAB_SP_VCHAR_OBS_TEXT = ['\t', ' '];
+		exports.HTAB_SP_VCHAR_OBS_TEXT = ['\t', ' '];
 		// VCHAR: https://tools.ietf.org/html/rfc5234#appendix-B.1
 		for (let i = 0x21; i <= 0x7E; i++) {
-		    exports$1.HTAB_SP_VCHAR_OBS_TEXT.push(i);
+		    exports.HTAB_SP_VCHAR_OBS_TEXT.push(i);
 		}
 		// OBS_TEXT: https://datatracker.ietf.org/doc/html/rfc9110#name-collected-abnf
 		for (let i = 0x80; i <= 0xff; i++) {
-		    exports$1.HTAB_SP_VCHAR_OBS_TEXT.push(i);
+		    exports.HTAB_SP_VCHAR_OBS_TEXT.push(i);
 		}
-		exports$1.MAJOR = exports$1.NUM_MAP;
-		exports$1.MINOR = exports$1.MAJOR;
-		exports$1.SPECIAL_HEADERS = {
-		    'connection': exports$1.HEADER_STATE.CONNECTION,
-		    'content-length': exports$1.HEADER_STATE.CONTENT_LENGTH,
-		    'proxy-connection': exports$1.HEADER_STATE.CONNECTION,
-		    'transfer-encoding': exports$1.HEADER_STATE.TRANSFER_ENCODING,
-		    'upgrade': exports$1.HEADER_STATE.UPGRADE,
+		exports.MAJOR = exports.NUM_MAP;
+		exports.MINOR = exports.MAJOR;
+		exports.SPECIAL_HEADERS = {
+		    'connection': exports.HEADER_STATE.CONNECTION,
+		    'content-length': exports.HEADER_STATE.CONTENT_LENGTH,
+		    'proxy-connection': exports.HEADER_STATE.CONNECTION,
+		    'transfer-encoding': exports.HEADER_STATE.TRANSFER_ENCODING,
+		    'upgrade': exports.HEADER_STATE.UPGRADE,
 		};
-		exports$1.default = {
-		    ERROR: exports$1.ERROR,
-		    TYPE: exports$1.TYPE,
-		    FLAGS: exports$1.FLAGS,
-		    LENIENT_FLAGS: exports$1.LENIENT_FLAGS,
-		    METHODS: exports$1.METHODS,
-		    STATUSES: exports$1.STATUSES,
-		    FINISH: exports$1.FINISH,
-		    HEADER_STATE: exports$1.HEADER_STATE,
-		    ALPHA: exports$1.ALPHA,
-		    NUM_MAP: exports$1.NUM_MAP,
-		    HEX_MAP: exports$1.HEX_MAP,
-		    NUM: exports$1.NUM,
-		    ALPHANUM: exports$1.ALPHANUM,
-		    MARK: exports$1.MARK,
-		    USERINFO_CHARS: exports$1.USERINFO_CHARS,
-		    URL_CHAR: exports$1.URL_CHAR,
-		    HEX: exports$1.HEX,
-		    TOKEN: exports$1.TOKEN,
-		    HEADER_CHARS: exports$1.HEADER_CHARS,
-		    CONNECTION_TOKEN_CHARS: exports$1.CONNECTION_TOKEN_CHARS,
-		    QUOTED_STRING: exports$1.QUOTED_STRING,
-		    HTAB_SP_VCHAR_OBS_TEXT: exports$1.HTAB_SP_VCHAR_OBS_TEXT,
-		    MAJOR: exports$1.MAJOR,
-		    MINOR: exports$1.MINOR,
-		    SPECIAL_HEADERS: exports$1.SPECIAL_HEADERS,
-		    METHODS_HTTP: exports$1.METHODS_HTTP,
-		    METHODS_ICE: exports$1.METHODS_ICE,
-		    METHODS_RTSP: exports$1.METHODS_RTSP,
-		    METHOD_MAP: exports$1.METHOD_MAP,
-		    H_METHOD_MAP: exports$1.H_METHOD_MAP,
-		    STATUSES_HTTP: exports$1.STATUSES_HTTP,
+		exports.default = {
+		    ERROR: exports.ERROR,
+		    TYPE: exports.TYPE,
+		    FLAGS: exports.FLAGS,
+		    LENIENT_FLAGS: exports.LENIENT_FLAGS,
+		    METHODS: exports.METHODS,
+		    STATUSES: exports.STATUSES,
+		    FINISH: exports.FINISH,
+		    HEADER_STATE: exports.HEADER_STATE,
+		    ALPHA: exports.ALPHA,
+		    NUM_MAP: exports.NUM_MAP,
+		    HEX_MAP: exports.HEX_MAP,
+		    NUM: exports.NUM,
+		    ALPHANUM: exports.ALPHANUM,
+		    MARK: exports.MARK,
+		    USERINFO_CHARS: exports.USERINFO_CHARS,
+		    URL_CHAR: exports.URL_CHAR,
+		    HEX: exports.HEX,
+		    TOKEN: exports.TOKEN,
+		    HEADER_CHARS: exports.HEADER_CHARS,
+		    CONNECTION_TOKEN_CHARS: exports.CONNECTION_TOKEN_CHARS,
+		    QUOTED_STRING: exports.QUOTED_STRING,
+		    HTAB_SP_VCHAR_OBS_TEXT: exports.HTAB_SP_VCHAR_OBS_TEXT,
+		    MAJOR: exports.MAJOR,
+		    MINOR: exports.MINOR,
+		    SPECIAL_HEADERS: exports.SPECIAL_HEADERS,
+		    METHODS_HTTP: exports.METHODS_HTTP,
+		    METHODS_ICE: exports.METHODS_ICE,
+		    METHODS_RTSP: exports.METHODS_RTSP,
+		    METHOD_MAP: exports.METHOD_MAP,
+		    H_METHOD_MAP: exports.H_METHOD_MAP,
+		    STATUSES_HTTP: exports.STATUSES_HTTP,
 		}; 
 	} (constants$3));
 	return constants$3;
@@ -5784,139 +5692,6 @@ function requireDataUrl () {
 	return dataUrl;
 }
 
-var runtimeFeatures = {};
-
-var hasRequiredRuntimeFeatures;
-
-function requireRuntimeFeatures () {
-	if (hasRequiredRuntimeFeatures) return runtimeFeatures;
-	hasRequiredRuntimeFeatures = 1;
-
-	/** @typedef {`node:${string}`} NodeModuleName */
-
-	/** @type {Record<NodeModuleName, () => any>} */
-	const lazyLoaders = {
-	  __proto__: null,
-	  'node:crypto': () => require$$2$2,
-	  'node:sqlite': () => require$$1$1,
-	  'node:worker_threads': () => require$$2$1,
-	  'node:zlib': () => require$$3$1
-	};
-
-	/**
-	 * @param {NodeModuleName} moduleName
-	 * @returns {boolean}
-	 */
-	function detectRuntimeFeatureByNodeModule (moduleName) {
-	  try {
-	    lazyLoaders[moduleName]();
-	    return true
-	  } catch (err) {
-	    if (err.code !== 'ERR_UNKNOWN_BUILTIN_MODULE' && err.code !== 'ERR_NO_CRYPTO') {
-	      throw err
-	    }
-	    return false
-	  }
-	}
-
-	/**
-	 * @param {NodeModuleName} moduleName
-	 * @param {string} property
-	 * @returns {boolean}
-	 */
-	function detectRuntimeFeatureByExportedProperty (moduleName, property) {
-	  const module = lazyLoaders[moduleName]();
-	  return typeof module[property] !== 'undefined'
-	}
-
-	const runtimeFeaturesByExportedProperty = /** @type {const} */ (['markAsUncloneable', 'zstd']);
-
-	/** @type {Record<RuntimeFeatureByExportedProperty, [NodeModuleName, string]>} */
-	const exportedPropertyLookup = {
-	  markAsUncloneable: ['node:worker_threads', 'markAsUncloneable'],
-	  zstd: ['node:zlib', 'createZstdDecompress']
-	};
-
-	/** @typedef {typeof runtimeFeaturesByExportedProperty[number]} RuntimeFeatureByExportedProperty */
-
-	const runtimeFeaturesAsNodeModule = /** @type {const} */ (['crypto', 'sqlite']);
-	/** @typedef {typeof runtimeFeaturesAsNodeModule[number]} RuntimeFeatureByNodeModule */
-
-	const features = /** @type {const} */ ([
-	  ...runtimeFeaturesAsNodeModule,
-	  ...runtimeFeaturesByExportedProperty
-	]);
-
-	/** @typedef {typeof features[number]} Feature */
-
-	/**
-	 * @param {Feature} feature
-	 * @returns {boolean}
-	 */
-	function detectRuntimeFeature (feature) {
-	  if (runtimeFeaturesAsNodeModule.includes(/** @type {RuntimeFeatureByNodeModule} */ (feature))) {
-	    return detectRuntimeFeatureByNodeModule(`node:${feature}`)
-	  } else if (runtimeFeaturesByExportedProperty.includes(/** @type {RuntimeFeatureByExportedProperty} */ (feature))) {
-	    const [moduleName, property] = exportedPropertyLookup[feature];
-	    return detectRuntimeFeatureByExportedProperty(moduleName, property)
-	  }
-	  throw new TypeError(`unknown feature: ${feature}`)
-	}
-
-	/**
-	 * @class
-	 * @name RuntimeFeatures
-	 */
-	class RuntimeFeatures {
-	  /** @type {Map<Feature, boolean>} */
-	  #map = new Map()
-
-	  /**
-	   * Clears all cached feature detections.
-	   */
-	  clear () {
-	    this.#map.clear();
-	  }
-
-	  /**
-	   * @param {Feature} feature
-	   * @returns {boolean}
-	   */
-	  has (feature) {
-	    return (
-	      this.#map.get(feature) ?? this.#detectRuntimeFeature(feature)
-	    )
-	  }
-
-	  /**
-	   * @param {Feature} feature
-	   * @param {boolean} value
-	   */
-	  set (feature, value) {
-	    if (features.includes(feature) === false) {
-	      throw new TypeError(`unknown feature: ${feature}`)
-	    }
-	    this.#map.set(feature, value);
-	  }
-
-	  /**
-	   * @param {Feature} feature
-	   * @returns {boolean}
-	   */
-	  #detectRuntimeFeature (feature) {
-	    const result = detectRuntimeFeature(feature);
-	    this.#map.set(feature, result);
-	    return result
-	  }
-	}
-
-	const instance = new RuntimeFeatures();
-
-	runtimeFeatures.runtimeFeatures = instance;
-	runtimeFeatures.default = instance;
-	return runtimeFeatures;
-}
-
 var webidl_1;
 var hasRequiredWebidl;
 
@@ -5926,7 +5701,7 @@ function requireWebidl () {
 
 	const assert = require$$0$1;
 	const { types, inspect } = require$$3;
-	const { runtimeFeatures } = requireRuntimeFeatures();
+	const { markAsUncloneable } = require$$2$1;
 
 	const UNDEFINED = 1;
 	const BOOLEAN = 2;
@@ -6082,9 +5857,7 @@ function requireWebidl () {
 	  }
 	};
 
-	webidl.util.markAsUncloneable = runtimeFeatures.has('markAsUncloneable')
-	  ? require$$2$1.markAsUncloneable
-	  : () => {};
+	webidl.util.markAsUncloneable = markAsUncloneable;
 
 	// https://webidl.spec.whatwg.org/#abstract-opdef-converttoint
 	webidl.util.ConvertToInt = function (V, bitLength, signedness, flags) {
@@ -6939,7 +6712,7 @@ function requireUtil$4 () {
 	hasRequiredUtil$4 = 1;
 
 	const { Transform } = require$$0$2;
-	const zlib = require$$3$1;
+	const zlib = require$$0$6;
 	const { redirectStatusSet, referrerPolicyTokens, badPortsSet } = requireConstants$2();
 	const { getGlobalOrigin } = requireGlobal$1();
 	const { collectAnHTTPQuotedString, parseMIMEType } = requireDataUrl();
@@ -8384,8 +8157,10 @@ function requireUtil$4 () {
 	 * @param {object|string} navigable
 	 */
 	function isTraversableNavigable (navigable) {
-	  // TODO
-	  return true
+	  // Returns true only if we have an actual traversable navigable object
+	  // that can prompt the user for credentials. In Node.js, this will always
+	  // be false since there's no Window object or navigable.
+	  return navigable != null && navigable !== 'client' && navigable !== 'no-traversable'
 	}
 
 	class EnvironmentSettingsObjectBase {
@@ -8736,10 +8511,10 @@ function requireFormdataParser () {
 	const { webidl } = requireWebidl();
 	const assert = require$$0$1;
 	const { isomorphicDecode } = requireInfra();
-	const { utf8DecodeBytes } = requireEncoding();
 
 	const dd = Buffer.from('--');
 	const decoder = new TextDecoder();
+	const decoderIgnoreBOM = new TextDecoder('utf-8', { ignoreBOM: true });
 
 	/**
 	 * @param {string} chars
@@ -8918,7 +8693,7 @@ function requireFormdataParser () {
 	      // 5.11. Otherwise:
 
 	      // 5.11.1. Let value be the UTF-8 decoding without BOM of body.
-	      value = utf8DecodeBytes(Buffer.from(body));
+	      value = decoderIgnoreBOM.decode(Buffer.from(body));
 	    }
 
 	    // 5.12. Assert: name is a scalar value string and value is either a scalar value string or a File object.
@@ -9306,40 +9081,106 @@ function requireFormdataParser () {
 	return formdataParser;
 }
 
-var promise;
-var hasRequiredPromise;
+var runtimeFeatures = {};
 
-function requirePromise () {
-	if (hasRequiredPromise) return promise;
-	hasRequiredPromise = 1;
+var hasRequiredRuntimeFeatures;
+
+function requireRuntimeFeatures () {
+	if (hasRequiredRuntimeFeatures) return runtimeFeatures;
+	hasRequiredRuntimeFeatures = 1;
+
+	/** @typedef {`node:${string}`} NodeModuleName */
+
+	/** @type {Record<NodeModuleName, () => any>} */
+	const lazyLoaders = {
+	  __proto__: null,
+	  'node:crypto': () => require$$2$2,
+	  'node:sqlite': () => require$$1$1
+	};
 
 	/**
-	 * @template {*} T
-	 * @typedef {Object} DeferredPromise
-	 * @property {Promise<T>} promise
-	 * @property {(value?: T) => void} resolve
-	 * @property {(reason?: any) => void} reject
+	 * @param {NodeModuleName} moduleName
+	 * @returns {boolean}
 	 */
-
-	/**
-	 * @template {*} T
-	 * @returns {DeferredPromise<T>} An object containing a promise and its resolve/reject methods.
-	 */
-	function createDeferredPromise () {
-	  let res;
-	  let rej;
-	  const promise = new Promise((resolve, reject) => {
-	    res = resolve;
-	    rej = reject;
-	  });
-
-	  return { promise, resolve: res, reject: rej }
+	function detectRuntimeFeatureByNodeModule (moduleName) {
+	  try {
+	    lazyLoaders[moduleName]();
+	    return true
+	  } catch (err) {
+	    if (err.code !== 'ERR_UNKNOWN_BUILTIN_MODULE' && err.code !== 'ERR_NO_CRYPTO') {
+	      throw err
+	    }
+	    return false
+	  }
 	}
 
-	promise = {
-	  createDeferredPromise
-	};
-	return promise;
+	const runtimeFeaturesAsNodeModule = /** @type {const} */ (['crypto', 'sqlite']);
+	/** @typedef {typeof runtimeFeaturesAsNodeModule[number]} RuntimeFeatureByNodeModule */
+	/** @typedef {RuntimeFeatureByNodeModule} Feature */
+
+	/**
+	 * @param {Feature} feature
+	 * @returns {boolean}
+	 */
+	function detectRuntimeFeature (feature) {
+	  if (runtimeFeaturesAsNodeModule.includes(/** @type {RuntimeFeatureByNodeModule} */ (feature))) {
+	    return detectRuntimeFeatureByNodeModule(`node:${feature}`)
+	  }
+	  throw new TypeError(`unknown feature: ${feature}`)
+	}
+
+	/**
+	 * @class
+	 * @name RuntimeFeatures
+	 */
+	class RuntimeFeatures {
+	  /** @type {Map<Feature, boolean>} */
+	  #map = new Map()
+
+	  /**
+	   * Clears all cached feature detections.
+	   */
+	  clear () {
+	    this.#map.clear();
+	  }
+
+	  /**
+	   * @param {Feature} feature
+	   * @returns {boolean}
+	   */
+	  has (feature) {
+	    return (
+	      this.#map.get(feature) ?? this.#detectRuntimeFeature(feature)
+	    )
+	  }
+
+	  /**
+	   * @param {Feature} feature
+	   * @param {boolean} value
+	   */
+	  set (feature, value) {
+	    if (runtimeFeaturesAsNodeModule.includes(feature) === false) {
+	      throw new TypeError(`unknown feature: ${feature}`)
+	    }
+	    this.#map.set(feature, value);
+	  }
+
+	  /**
+	   * @param {Feature} feature
+	   * @returns {boolean}
+	   */
+	  #detectRuntimeFeature (feature) {
+	    const result = detectRuntimeFeature(feature);
+	    this.#map.set(feature, result);
+	    return result
+	  }
+	}
+
+	const instance = new RuntimeFeatures();
+
+	runtimeFeatures.runtimeFeatures = instance;
+	runtimeFeatures.default = instance;
+	return runtimeFeatures;
 }
 
 var body;
@@ -9363,7 +9204,6 @@ function requireBody () {
 	const { isUint8Array } = require$$8;
 	const { serializeAMimeType } = requireDataUrl();
 	const { multipartFormDataParser } = requireFormdataParser();
-	const { createDeferredPromise } = requirePromise();
 	const { parseJSONFromBytes } = requireInfra();
 	const { utf8DecodeBytes } = requireEncoding();
 	const { runtimeFeatures } = requireRuntimeFeatures();
@@ -9780,7 +9620,7 @@ function requireBody () {
 	  }
 
 	  // 2. Let promise be a new promise.
-	  const promise = createDeferredPromise();
+	  const promise = Promise.withResolvers();
 
 	  // 3. Let errorSteps given error be to reject promise with error.
 	  const errorSteps = promise.reject;
@@ -10073,8 +9913,8 @@ function requireClientH1 () {
 	     * @param {import('net').Socket} socket
 	     * @param {*} llhttp
 	     */
-	  constructor (client, socket, { exports: exports$1 }) {
-	    this.llhttp = exports$1;
+	  constructor (client, socket, { exports }) {
+	    this.llhttp = exports;
 	    this.ptr = this.llhttp.llhttp_alloc(constants.TYPE.RESPONSE);
 	    this.client = client;
 	    /**
@@ -10373,7 +10213,7 @@ function requireClientH1 () {
 	    client.emit('disconnect', client[kUrl], [client], new InformationalError('upgrade'));
 
 	    try {
-	      request.onUpgrade(statusCode, headers, socket);
+	      request.onRequestUpgrade(statusCode, headers, socket);
 	    } catch (err) {
 	      util.destroy(socket, err);
 	    }
@@ -10471,7 +10311,7 @@ function requireClientH1 () {
 	      socket[kReset] = true;
 	    }
 
-	    const pause = request.onHeaders(statusCode, headers, this.resume, statusText) === false;
+	    const pause = request.onResponseStart(statusCode, headers, this.resume, statusText) === false;
 
 	    if (request.aborted) {
 	      return -1
@@ -10523,7 +10363,7 @@ function requireClientH1 () {
 
 	    this.bytesRead += buf.length;
 
-	    if (request.onData(buf) === false) {
+	    if (request.onResponseData(buf) === false) {
 	      return constants.ERROR.PAUSED
 	    }
 
@@ -10569,7 +10409,7 @@ function requireClientH1 () {
 	      return -1
 	    }
 
-	    request.onComplete(headers);
+	    request.onResponseEnd(headers);
 
 	    client[kQueue][client[kRunningIdx]++] = null;
 
@@ -10944,7 +10784,7 @@ function requireClientH1 () {
 	  };
 
 	  try {
-	    request.onConnect(abort);
+	    request.onRequestStart(abort, null);
 	  } catch (err) {
 	    util.errorRequest(client, request, err);
 	  }
@@ -11978,7 +11818,7 @@ function requireClientH2 () {
 	  try {
 	    // We are already connected, streams are pending.
 	    // We can call on connect, and wait for abort
-	    request.onConnect(abort);
+	    request.onRequestStart(abort, null);
 	  } catch (err) {
 	    util.errorRequest(client, request, err);
 	  }
@@ -12018,7 +11858,7 @@ function requireClientH2 () {
 	      stream.once('response', (headers, _flags) => {
 	        const { [HTTP2_HEADER_STATUS]: statusCode, ...realHeaders } = headers;
 
-	        request.onUpgrade(statusCode, parseH2Headers(realHeaders), stream);
+	        request.onRequestUpgrade(statusCode, parseH2Headers(realHeaders), stream);
 
 	        ++session[kOpenStreams];
 	        client[kQueue][client[kRunningIdx]++] = null;
@@ -12052,7 +11892,7 @@ function requireClientH2 () {
 	    stream.on('response', headers => {
 	      const { [HTTP2_HEADER_STATUS]: statusCode, ...realHeaders } = headers;
 
-	      request.onUpgrade(statusCode, parseH2Headers(realHeaders), stream);
+	      request.onRequestUpgrade(statusCode, parseH2Headers(realHeaders), stream);
 	      ++session[kOpenStreams];
 	      client[kQueue][client[kRunningIdx]++] = null;
 	    });
@@ -12181,7 +12021,7 @@ function requireClientH2 () {
 	      return
 	    }
 
-	    if (request.onHeaders(Number(statusCode), parseH2Headers(realHeaders), stream.resume.bind(stream), '') === false) {
+	    if (request.onResponseStart(Number(statusCode), parseH2Headers(realHeaders), stream.resume.bind(stream), '') === false) {
 	      stream.pause();
 	    }
 
@@ -12190,7 +12030,7 @@ function requireClientH2 () {
 	        return
 	      }
 
-	      if (request.onData(chunk) === false) {
+	      if (request.onResponseData(chunk) === false) {
 	        stream.pause();
 	      }
 	    });
@@ -12201,7 +12041,7 @@ function requireClientH2 () {
 	    // If we received a response, this is a normal completion
 	    if (responseReceived) {
 	      if (!request.aborted && !request.completed) {
-	        request.onComplete({});
+	        request.onResponseEnd({});
 	      }
 
 	      client[kQueue][client[kRunningIdx]++] = null;
@@ -12255,8 +12095,7 @@ function requireClientH2 () {
 	      return
 	    }
 
-	    stream.removeAllListeners('data');
-	    request.onComplete(trailers);
+	    request.onResponseEnd(trailers);
 	  });
 
 	  return true
@@ -12601,7 +12440,8 @@ function requireClient () {
 	    useH2c,
 	    initialWindowSize,
 	    connectionWindowSize,
-	    pingInterval
+	    pingInterval,
+	    webSocket
 	  } = {}) {
 	    if (keepAlive !== undefined) {
 	      throw new InvalidArgumentError('unsupported keepAlive, use pipelining=0 instead')
@@ -12709,7 +12549,7 @@ function requireClient () {
 	      throw new InvalidArgumentError('pingInterval must be a positive integer, greater or equal to 0')
 	    }
 
-	    super();
+	    super({ webSocket });
 
 	    if (typeof connect !== 'function') {
 	      connect = buildConnector({
@@ -12722,9 +12562,13 @@ function requireClient () {
 	        ...(typeof autoSelectFamily === 'boolean' ? { autoSelectFamily, autoSelectFamilyAttemptTimeout } : undefined),
 	        ...connect
 	      });
-	    } else if (socketPath != null) {
+	    } else {
 	      const customConnect = connect;
-	      connect = (opts, callback) => customConnect({ ...opts, socketPath }, callback);
+	      connect = (opts, callback) => customConnect({
+	        ...opts,
+	        ...(socketPath != null ? { socketPath } : null),
+	        ...(allowH2 != null ? { allowH2 } : null)
+	      }, callback);
 	    }
 
 	    this[kUrl] = util.parseOrigin(url);
@@ -12937,65 +12781,70 @@ function requireClient () {
 	    });
 	  }
 
-	  client[kConnector]({
-	    host,
-	    hostname,
-	    protocol,
-	    port,
-	    servername: client[kServerName],
-	    localAddress: client[kLocalAddress]
-	  }, (err, socket) => {
-	    if (err) {
-	      handleConnectError(client, err, { host, hostname, protocol, port });
+	  try {
+	    client[kConnector]({
+	      host,
+	      hostname,
+	      protocol,
+	      port,
+	      servername: client[kServerName],
+	      localAddress: client[kLocalAddress]
+	    }, (err, socket) => {
+	      if (err) {
+	        handleConnectError(client, err, { host, hostname, protocol, port });
+	        client[kResume]();
+	        return
+	      }
+
+	      if (client.destroyed) {
+	        util.destroy(socket.on('error', noop), new ClientDestroyedError());
+	        client[kResume]();
+	        return
+	      }
+
+	      assert(socket);
+
+	      try {
+	        client[kHTTPContext] = socket.alpnProtocol === 'h2'
+	          ? connectH2(client, socket)
+	          : connectH1(client, socket);
+	      } catch (err) {
+	        socket.destroy().on('error', noop);
+	        handleConnectError(client, err, { host, hostname, protocol, port });
+	        client[kResume]();
+	        return
+	      }
+
+	      client[kConnecting] = false;
+
+	      socket[kCounter] = 0;
+	      socket[kMaxRequests] = client[kMaxRequests];
+	      socket[kClient] = client;
+	      socket[kError] = null;
+
+	      if (channels.connected.hasSubscribers) {
+	        channels.connected.publish({
+	          connectParams: {
+	            host,
+	            hostname,
+	            protocol,
+	            port,
+	            version: client[kHTTPContext]?.version,
+	            servername: client[kServerName],
+	            localAddress: client[kLocalAddress]
+	          },
+	          connector: client[kConnector],
+	          socket
+	        });
+	      }
+
+	      client.emit('connect', client[kUrl], [client]);
 	      client[kResume]();
-	      return
-	    }
-
-	    if (client.destroyed) {
-	      util.destroy(socket.on('error', noop), new ClientDestroyedError());
-	      client[kResume]();
-	      return
-	    }
-
-	    assert(socket);
-
-	    try {
-	      client[kHTTPContext] = socket.alpnProtocol === 'h2'
-	        ? connectH2(client, socket)
-	        : connectH1(client, socket);
-	    } catch (err) {
-	      socket.destroy().on('error', noop);
-	      handleConnectError(client, err, { host, hostname, protocol, port });
-	      client[kResume]();
-	      return
-	    }
-
-	    client[kConnecting] = false;
-
-	    socket[kCounter] = 0;
-	    socket[kMaxRequests] = client[kMaxRequests];
-	    socket[kClient] = client;
-	    socket[kError] = null;
-
-	    if (channels.connected.hasSubscribers) {
-	      channels.connected.publish({
-	        connectParams: {
-	          host,
-	          hostname,
-	          protocol,
-	          port,
-	          version: client[kHTTPContext]?.version,
-	          servername: client[kServerName],
-	          localAddress: client[kLocalAddress]
-	        },
-	        connector: client[kConnector],
-	        socket
-	      });
-	    }
-
-	    client.emit('connect', client[kUrl], [client]);
+	    });
+	  } catch (err) {
+	    handleConnectError(client, err, { host, hostname, protocol, port });
 	    client[kResume]();
-	  });
+	  }
 	}
 
 	function handleConnectError (client, err, { host, hostname, protocol, port }) {
@@ -13433,7 +13282,7 @@ function requirePoolBase () {
 	      if (!item) {
 	        break
 	      }
-	      item.handler.onError(err);
+	      item.handler.onResponseError(null, err);
 	    }
 
 	    const destroyAll = new Array(this[kClients].length);
@@ -13575,14 +13424,11 @@ function requirePool () {
 	      });
 	    }
 
-	    super();
+	    super(options);
 
 	    this[kConnections] = connections || null;
 	    this[kUrl] = util.parseOrigin(origin);
 	    this[kOptions] = { ...util.deepClone(options), connect, allowH2, clientTtl, socketPath };
-	    this[kOptions].interceptors = options.interceptors
-	      ? { ...options.interceptors }
-	      : undefined;
 	    this[kFactory] = factory;
 
 	    this.on('connect', (origin, targets) => {
@@ -13695,9 +13541,6 @@ function requireBalancedPool () {
 	    super();
 
 	    this[kOptions] = { ...util.deepClone(opts) };
-	    this[kOptions].interceptors = opts.interceptors
-	      ? { ...opts.interceptors }
-	      : undefined;
 	    this[kIndex] = -1;
 	    this[kCurrentWeight] = 0;
 
@@ -13934,9 +13777,6 @@ function requireRoundRobinPool () {
 	    this[kConnections] = connections || null;
 	    this[kUrl] = util.parseOrigin(origin);
 	    this[kOptions] = { ...util.deepClone(options), connect, allowH2, clientTtl, socketPath };
-	    this[kOptions].interceptors = options.interceptors
-	      ? { ...options.interceptors }
-	      : undefined;
 	    this[kFactory] = factory;
 	    this[kIndex] = -1;
 
@@ -14045,7 +13885,7 @@ function requireAgent () {
 	      throw new InvalidArgumentError('maxOrigins must be a number greater than 0')
 	    }
 
-	    super();
+	    super(options);
 
 	    if (connect && typeof connect !== 'function') {
 	      connect = { ...connect };
@@ -14082,14 +13922,17 @@ function requireAgent () {
 	  }
 
 	  [kDispatch] (opts, handler) {
-	    let key;
+	    let origin;
 	    if (opts.origin && (typeof opts.origin === 'string' || opts.origin instanceof URL)) {
-	      key = String(opts.origin);
+	      origin = String(opts.origin);
 	    } else {
 	      throw new InvalidArgumentError('opts.origin must be a non-empty string or URL.')
 	    }
 
-	    if (this[kOrigins].size >= this[kOptions].maxOrigins && !this[kOrigins].has(key)) {
+	    const allowH2 = opts.allowH2 ?? this[kOptions].allowH2;
+	    const key = allowH2 === false ? `${origin}#http1-only` : origin;
+
+	    if (this[kOrigins].size >= this[kOptions].maxOrigins && !this[kOrigins].has(origin)) {
 	      throw new MaxOriginsReachedError()
 	    }
 
@@ -14106,10 +13949,23 @@ function requireAgent () {
 	              result.dispatcher.close();
 	            }
 	          }
-	          this[kOrigins].delete(key);
+
+	          let hasOrigin = false;
+	          for (const entry of this[kClients].values()) {
+	            if (entry.origin === origin) {
+	              hasOrigin = true;
+	              break
+	            }
+	          }
+
+	          if (!hasOrigin) {
+	            this[kOrigins].delete(origin);
+	          }
 	        }
 	      };
-	      dispatcher = this[kFactory](opts.origin, this[kOptions])
+	      dispatcher = this[kFactory](opts.origin, allowH2 === false
+	        ? { ...this[kOptions], allowH2: false }
+	        : this[kOptions])
 	        .on('drain', this[kOnDrain])
 	        .on('connect', (origin, targets) => {
 	          const result = this[kClients].get(key);
@@ -14127,8 +13983,8 @@ function requireAgent () {
 	          this[kOnConnectionError](origin, targets, err);
 	        });
 
-	      this[kClients].set(key, { count: 0, dispatcher });
-	      this[kOrigins].add(key);
+	      this[kClients].set(key, { count: 0, dispatcher, origin });
+	      this[kOrigins].add(origin);
 	    }
 
 	    return dispatcher.dispatch(opts, handler)
@@ -14167,6 +14023,121 @@ function requireAgent () {
 
 	agent = Agent;
 	return agent;
+}
+
+var dispatcher1Wrapper;
+var hasRequiredDispatcher1Wrapper;
+
+function requireDispatcher1Wrapper () {
+	if (hasRequiredDispatcher1Wrapper) return dispatcher1Wrapper;
+	hasRequiredDispatcher1Wrapper = 1;
+
+	const Dispatcher = requireDispatcher();
+	const { InvalidArgumentError } = requireErrors();
+	const { toRawHeaders } = requireUtil$5();
+
+	class LegacyHandlerWrapper {
+	  #handler
+
+	  constructor (handler) {
+	    this.#handler = handler;
+	  }
+
+	  onRequestStart (controller, context) {
+	    this.#handler.onConnect?.((reason) => controller.abort(reason), context);
+	  }
+
+	  onRequestUpgrade (controller, statusCode, headers, socket) {
+	    const rawHeaders = controller?.rawHeaders ?? toRawHeaders(headers ?? {});
+	    this.#handler.onUpgrade?.(statusCode, rawHeaders, socket);
+	  }
+
+	  onResponseStart (controller, statusCode, headers, statusMessage) {
+	    const rawHeaders = controller?.rawHeaders ?? toRawHeaders(headers ?? {});
+
+	    if (this.#handler.onHeaders?.(statusCode, rawHeaders, () => controller.resume(), statusMessage) === false) {
+	      controller.pause();
+	    }
+	  }
+
+	  onResponseData (controller, chunk) {
+	    if (this.#handler.onData?.(chunk) === false) {
+	      controller.pause();
+	    }
+	  }
+
+	  onResponseEnd (controller, trailers) {
+	    const rawTrailers = controller?.rawTrailers ?? toRawHeaders(trailers ?? {});
+	    this.#handler.onComplete?.(rawTrailers);
+	  }
+
+	  onResponseError (_controller, err) {
+	    if (!this.#handler.onError) {
+	      throw err
+	    }
+
+	    this.#handler.onError(err);
+	  }
+
+	  onBodySent (chunk) {
+	    this.#handler.onBodySent?.(chunk);
+	  }
+
+	  onRequestSent () {
+	    this.#handler.onRequestSent?.();
+	  }
+
+	  onResponseStarted () {
+	    this.#handler.onResponseStarted?.();
+	  }
+	}
+
+	class Dispatcher1Wrapper extends Dispatcher {
+	  #dispatcher
+
+	  constructor (dispatcher) {
+	    super();
+
+	    if (!dispatcher || typeof dispatcher.dispatch !== 'function') {
+	      throw new InvalidArgumentError('Argument dispatcher must implement dispatch')
+	    }
+
+	    this.#dispatcher = dispatcher;
+	  }
+
+	  static wrapHandler (handler) {
+	    if (!handler || typeof handler !== 'object') {
+	      throw new InvalidArgumentError('handler must be an object')
+	    }
+
+	    if (typeof handler.onRequestStart === 'function') {
+	      return handler
+	    }
+
+	    return new LegacyHandlerWrapper(handler)
+	  }
+
+	  dispatch (opts, handler) {
+	    // Legacy (v1) consumers do not support HTTP/2, so force HTTP/1.1.
+	    // See https://github.com/nodejs/undici/issues/4989
+	    if (opts.allowH2 !== false) {
+	      opts = { ...opts, allowH2: false };
+	    }
+
+	    return this.#dispatcher.dispatch(opts, Dispatcher1Wrapper.wrapHandler(handler))
+	  }
+
+	  close (...args) {
+	    return this.#dispatcher.close(...args)
+	  }
+
+	  destroy (...args) {
+	    return this.#dispatcher.destroy(...args)
+	  }
+	}
+
+	dispatcher1Wrapper = Dispatcher1Wrapper;
+	return dispatcher1Wrapper;
 }
 
 var socks5Utils;
@@ -14881,25 +14852,27 @@ function requireSocks5ProxyAgent () {
 	    debug('creating SOCKS5 connection to', proxyHost, proxyPort);
 
 	    // Connect to the SOCKS5 proxy
-	    const socket = await new Promise((resolve, reject) => {
-	      const onConnect = () => {
-	        socket.removeListener('error', onError);
-	        resolve(socket);
-	      };
+	    const socketReady = Promise.withResolvers();
 
-	      const onError = (err) => {
-	        socket.removeListener('connect', onConnect);
-	        reject(err);
-	      };
+	    const onSocketConnect = () => {
+	      socket.removeListener('error', onSocketError);
+	      socketReady.resolve(socket);
+	    };
 
-	      const socket = net.connect({
-	        host: proxyHost,
-	        port: proxyPort
-	      });
+	    const onSocketError = (err) => {
+	      socket.removeListener('connect', onSocketConnect);
+	      socketReady.reject(err);
+	    };
 
-	      socket.once('connect', onConnect);
-	      socket.once('error', onError);
+	    const socket = net.connect({
+	      host: proxyHost,
+	      port: proxyPort
 	    });
+
+	    socket.once('connect', onSocketConnect);
+	    socket.once('error', onSocketError);
+
+	    await socketReady.promise;
 
 	    // Create SOCKS5 client
 	    const socks5Client = new Socks5Client(socket, this[kProxyAuth]);
@@ -14914,58 +14887,62 @@ function requireSocks5ProxyAgent () {
 	    await socks5Client.handshake();
 
 	    // Wait for authentication (if required)
-	    await new Promise((resolve, reject) => {
-	      const timeout = setTimeout(() => {
-	        reject(new Error('SOCKS5 authentication timeout'));
-	      }, 5000);
+	    const authenticationReady = Promise.withResolvers();
 
-	      const onAuthenticated = () => {
-	        clearTimeout(timeout);
-	        socks5Client.removeListener('error', onError);
-	        resolve();
-	      };
+	    const authenticationTimeout = setTimeout(() => {
+	      authenticationReady.reject(new Error('SOCKS5 authentication timeout'));
+	    }, 5000);
 
-	      const onError = (err) => {
-	        clearTimeout(timeout);
-	        socks5Client.removeListener('authenticated', onAuthenticated);
-	        reject(err);
-	      };
+	    const onAuthenticated = () => {
+	      clearTimeout(authenticationTimeout);
+	      socks5Client.removeListener('error', onAuthenticationError);
+	      authenticationReady.resolve();
+	    };
 
-	      // Check if already authenticated (for NO_AUTH method)
-	      if (socks5Client.state === 'authenticated') {
-	        clearTimeout(timeout);
-	        resolve();
-	      } else {
-	        socks5Client.once('authenticated', onAuthenticated);
-	        socks5Client.once('error', onError);
-	      }
-	    });
+	    const onAuthenticationError = (err) => {
+	      clearTimeout(authenticationTimeout);
+	      socks5Client.removeListener('authenticated', onAuthenticated);
+	      authenticationReady.reject(err);
+	    };
+
+	    // Check if already authenticated (for NO_AUTH method)
+	    if (socks5Client.state === 'authenticated') {
+	      clearTimeout(authenticationTimeout);
+	      authenticationReady.resolve();
+	    } else {
+	      socks5Client.once('authenticated', onAuthenticated);
+	      socks5Client.once('error', onAuthenticationError);
+	    }
+
+	    await authenticationReady.promise;
 
 	    // Send CONNECT command
 	    await socks5Client.connect(targetHost, targetPort);
 
 	    // Wait for connection
-	    await new Promise((resolve, reject) => {
-	      const timeout = setTimeout(() => {
-	        reject(new Error('SOCKS5 connection timeout'));
-	      }, 5000);
+	    const connectionReady = Promise.withResolvers();
 
-	      const onConnected = (info) => {
-	        debug('SOCKS5 tunnel established to', targetHost, targetPort, 'via', info);
-	        clearTimeout(timeout);
-	        socks5Client.removeListener('error', onError);
-	        resolve();
-	      };
+	    const connectionTimeout = setTimeout(() => {
+	      connectionReady.reject(new Error('SOCKS5 connection timeout'));
+	    }, 5000);
 
-	      const onError = (err) => {
-	        clearTimeout(timeout);
-	        socks5Client.removeListener('connected', onConnected);
-	        reject(err);
-	      };
+	    const onConnected = (info) => {
+	      debug('SOCKS5 tunnel established to', targetHost, targetPort, 'via', info);
+	      clearTimeout(connectionTimeout);
+	      socks5Client.removeListener('error', onConnectionError);
+	      connectionReady.resolve();
+	    };
 
-	      socks5Client.once('connected', onConnected);
-	      socks5Client.once('error', onError);
-	    });
+	    const onConnectionError = (err) => {
+	      clearTimeout(connectionTimeout);
+	      socks5Client.removeListener('connected', onConnected);
+	      connectionReady.reject(err);
+	    };
+
+	    socks5Client.once('connected', onConnected);
+	    socks5Client.once('error', onConnectionError);
+
+	    await connectionReady.promise;
 
 	    return socket
 	  }
@@ -15008,10 +14985,10 @@ function requireSocks5ProxyAgent () {
 	                  ...connectOpts.tls || {}
 	                });
 
-	                await new Promise((resolve, reject) => {
-	                  finalSocket.once('secureConnect', resolve);
-	                  finalSocket.once('error', reject);
-	                });
+	                const tlsReady = Promise.withResolvers();
+	                finalSocket.once('secureConnect', tlsReady.resolve);
+	                finalSocket.once('error', tlsReady.reject);
+	                await tlsReady.promise;
 	              }
 
 	              callback(null, finalSocket);
@@ -15075,6 +15052,7 @@ function requireProxyAgent () {
 	const kRequestTls = Symbol('request tls settings');
 	const kProxyTls = Symbol('proxy tls settings');
 	const kConnectEndpoint = Symbol('connect endpoint function');
+	const kConnectEndpointHTTP1 = Symbol('connect endpoint function (http/1.1 only)');
 	const kTunnelProxy = Symbol('tunnel proxy');
 
 	function defaultProtocolPort (protocol) {
@@ -15113,15 +15091,15 @@ function requireProxyAgent () {
 	  }
 
 	  [kDispatch] (opts, handler) {
-	    const onHeaders = handler.onHeaders;
-	    handler.onHeaders = function (statusCode, data, resume) {
+	    const onResponseStart = handler.onResponseStart;
+	    handler.onResponseStart = function (controller, statusCode, data, statusMessage) {
 	      if (statusCode === 407) {
-	        if (typeof handler.onError === 'function') {
-	          handler.onError(new InvalidArgumentError('Proxy Authentication Required (407)'));
+	        if (typeof handler.onResponseError === 'function') {
+	          handler.onResponseError(controller, new InvalidArgumentError('Proxy Authentication Required (407)'));
 	        }
 	        return
 	      }
-	      if (onHeaders) onHeaders.call(this, statusCode, data, resume);
+	      if (onResponseStart) onResponseStart.call(this, controller, statusCode, data, statusMessage);
 	    };
 
 	    // Rewrite request as an HTTP1 Proxy request, without tunneling.
@@ -15162,7 +15140,7 @@ function requireProxyAgent () {
 	      throw new InvalidArgumentError('Proxy opts.clientFactory must be a function.')
 	    }
 
-	    const { proxyTunnel = true } = opts;
+	    const { proxyTunnel = true, connectTimeout } = opts;
 
 	    super();
 
@@ -15186,8 +15164,9 @@ function requireProxyAgent () {
 	      this[kProxyHeaders]['proxy-authorization'] = `Basic ${Buffer.from(`${decodeURIComponent(username)}:${decodeURIComponent(password)}`).toString('base64')}`;
 	    }
 
-	    const connect = buildConnector({ ...opts.proxyTls });
-	    this[kConnectEndpoint] = buildConnector({ ...opts.requestTls });
+	    const connect = buildConnector({ timeout: connectTimeout, ...opts.proxyTls });
+	    this[kConnectEndpoint] = buildConnector({ timeout: connectTimeout, ...opts.requestTls });
+	    this[kConnectEndpointHTTP1] = buildConnector({ timeout: connectTimeout, ...opts.requestTls, allowH2: false });
 
 	    const agentFactory = opts.factory || defaultAgentFactory;
 	    const factory = (origin, options) => {
@@ -15275,7 +15254,11 @@ function requireProxyAgent () {
 	          } else {
 	            servername = opts.servername;
 	          }
-	          this[kConnectEndpoint]({ ...opts, servername, httpSocket: socket }, callback);
+	          const connectEndpoint = opts.allowH2 === false
+	            ? this[kConnectEndpointHTTP1]
+	            : this[kConnectEndpoint];
+
+	          connectEndpoint({ ...opts, servername, httpSocket: socket }, callback);
 	        } catch (err) {
 	          if (err.code === 'ERR_TLS_CERT_ALTNAME_INVALID') {
 	            // Throw a custom error to avoid loop in client.js#connect
@@ -15542,7 +15525,6 @@ function requireRetryHandler () {
 
 	const { kRetryHandlerDefaultRetry } = requireSymbols();
 	const { RequestRetryError } = requireErrors();
-	const WrapHandler = requireWrapHandler();
 	const {
 	  isDisturbed,
 	  parseRangeHeader,
@@ -15574,7 +15556,7 @@ function requireRetryHandler () {
 
 	    this.error = null;
 	    this.dispatch = dispatch;
-	    this.handler = WrapHandler.wrap(handler);
+	    this.handler = handler;
 	    this.opts = { ...dispatchOpts, body: wrapRequestBody(opts.body) };
 	    this.retryOpts = {
 	      throwOnError: throwOnError ?? true,
@@ -15999,7 +15981,7 @@ function requireH2cClient () {
 	      )
 	    }
 
-	    const { connect, maxConcurrentStreams, pipelining, ...opts } =
+	    const { maxConcurrentStreams, pipelining, ...opts } =
 	            clientOpts ?? {};
 	    let defaultMaxConcurrentStreams = 100;
 	    let defaultPipelining = 100;
@@ -16688,6 +16670,7 @@ function requireApiRequest () {
 	    this.body = body;
 	    this.trailers = {};
 	    this.context = null;
+	    this.controller = null;
 	    this.onInfo = onInfo || null;
 	    this.highWaterMark = highWaterMark;
 	    this.reason = null;
@@ -16707,36 +16690,40 @@ function requireApiRequest () {
 	    }
 	  }
 
-	  onConnect (abort, context) {
+	  onRequestStart (controller, context) {
 	    if (this.reason) {
-	      abort(this.reason);
+	      controller.abort(this.reason);
 	      return
 	    }
 
 	    assert(this.callback);
 
-	    this.abort = abort;
+	    this.controller = controller;
+	    this.abort = (reason) => controller.abort(reason);
 	    this.context = context;
 	  }
 
-	  onHeaders (statusCode, rawHeaders, resume, statusMessage) {
-	    const { callback, opaque, abort, context, responseHeaders, highWaterMark } = this;
+	  onResponseStart (controller, statusCode, headers, statusText) {
+	    const { callback, opaque, context, responseHeaders, highWaterMark } = this;
 
-	    const headers = responseHeaders === 'raw' ? util.parseRawHeaders(rawHeaders) : util.parseHeaders(rawHeaders);
+	    const rawHeaders = controller?.rawHeaders;
+	    const responseHeaderData = responseHeaders === 'raw'
+	      ? (Array.isArray(rawHeaders) ? util.parseRawHeaders(rawHeaders) : [])
+	      : headers;
 
 	    if (statusCode < 200) {
 	      if (this.onInfo) {
-	        this.onInfo({ statusCode, headers });
+	        this.onInfo({ statusCode, headers: responseHeaderData });
 	      }
 	      return
 	    }
 
-	    const parsedHeaders = responseHeaders === 'raw' ? util.parseHeaders(rawHeaders) : headers;
-	    const contentType = parsedHeaders['content-type'];
-	    const contentLength = parsedHeaders['content-length'];
+	    const parsedHeaders = headers;
+	    const contentType = parsedHeaders?.['content-type'];
+	    const contentLength = parsedHeaders?.['content-length'];
 	    const res = new Readable({
-	      resume,
-	      abort,
+	      resume: () => controller.resume(),
+	      abort: (reason) => controller.abort(reason),
 	      contentType,
 	      contentLength: this.method !== 'HEAD' && contentLength
 	        ? Number(contentLength)
@@ -16755,8 +16742,8 @@ function requireApiRequest () {
 	      try {
 	        this.runInAsyncScope(callback, null, null, {
 	          statusCode,
-	          statusText: statusMessage,
-	          headers,
+	          statusText,
+	          headers: responseHeaderData,
 	          trailers: this.trailers,
 	          opaque,
 	          body: res,
@@ -16778,16 +16765,35 @@ function requireApiRequest () {
 	    }
 	  }
 
-	  onData (chunk) {
-	    return this.res.push(chunk)
+	  onResponseData (controller, chunk) {
+	    if (!this.res) {
+	      return
+	    }
+
+	    if (this.res.push(chunk) === false) {
+	      controller.pause();
+	    }
 	  }
 
-	  onComplete (trailers) {
-	    util.parseHeaders(trailers, this.trailers);
-	    this.res.push(null);
+	  onResponseEnd (_controller, trailers) {
+	    if (trailers && typeof trailers === 'object') {
+	      for (const key of Object.keys(trailers)) {
+	        if (key === '__proto__') {
+	          Object.defineProperty(this.trailers, key, {
+	            value: trailers[key],
+	            enumerable: true,
+	            configurable: true,
+	            writable: true
+	          });
+	        } else {
+	          this.trailers[key] = trailers[key];
+	        }
+	      }
+	    }
+	    this.res?.push(null);
 	  }
 
-	  onError (err) {
+	  onResponseError (_controller, err) {
 	    const { res, callback, body, opaque } = this;
 
 	    if (callback) {
@@ -16976,39 +16982,44 @@ function requireApiStream () {
 	    this.res = null;
 	    this.abort = null;
 	    this.context = null;
+	    this.controller = null;
 	    this.trailers = null;
 	    this.body = body;
 	    this.onInfo = onInfo || null;
 
 	    if (util.isStream(body)) {
 	      body.on('error', (err) => {
-	        this.onError(err);
+	        this.onResponseError(this.controller, err);
 	      });
 	    }
 
 	    addSignal(this, signal);
 	  }
 
-	  onConnect (abort, context) {
+	  onRequestStart (controller, context) {
 	    if (this.reason) {
-	      abort(this.reason);
+	      controller.abort(this.reason);
 	      return
 	    }
 
 	    assert(this.callback);
 
-	    this.abort = abort;
+	    this.controller = controller;
+	    this.abort = (reason) => controller.abort(reason);
 	    this.context = context;
 	  }
 
-	  onHeaders (statusCode, rawHeaders, resume, statusMessage) {
+	  onResponseStart (controller, statusCode, headers, _statusMessage) {
 	    const { factory, opaque, context, responseHeaders } = this;
 
-	    const headers = responseHeaders === 'raw' ? util.parseRawHeaders(rawHeaders) : util.parseHeaders(rawHeaders);
+	    const rawHeaders = controller?.rawHeaders;
+	    const responseHeaderData = responseHeaders === 'raw'
+	      ? (Array.isArray(rawHeaders) ? util.parseRawHeaders(rawHeaders) : [])
+	      : headers;
 
 	    if (statusCode < 200) {
 	      if (this.onInfo) {
-	        this.onInfo({ statusCode, headers });
+	        this.onInfo({ statusCode, headers: responseHeaderData });
 	      }
 	      return
 	    }
@@ -17021,7 +17032,7 @@ function requireApiStream () {
 
 	    const res = this.runInAsyncScope(factory, null, {
 	      statusCode,
-	      headers,
+	      headers: responseHeaderData,
 	      opaque,
 	      context
 	    });
@@ -17052,7 +17063,7 @@ function requireApiStream () {
 	      }
 	    });
 
-	    res.on('drain', resume);
+	    res.on('drain', () => controller.resume());
 
 	    this.res = res;
 
@@ -17060,16 +17071,24 @@ function requireApiStream () {
 	      ? res.writableNeedDrain
 	      : res._writableState?.needDrain;
 
-	    return needDrain !== true
+	    if (needDrain === true) {
+	      controller.pause();
+	    }
 	  }
 
-	  onData (chunk) {
+	  onResponseData (controller, chunk) {
 	    const { res } = this;
 
-	    return res ? res.write(chunk) : true
+	    if (!res) {
+	      return
+	    }
+
+	    if (res.write(chunk) === false) {
+	      controller.pause();
+	    }
 	  }
 
-	  onComplete (trailers) {
+	  onResponseEnd (_controller, trailers) {
 	    const { res } = this;
 
 	    removeSignal(this);
@@ -17078,12 +17097,14 @@ function requireApiStream () {
 	      return
 	    }
 
-	    this.trailers = util.parseHeaders(trailers);
+	    if (trailers && typeof trailers === 'object') {
+	      this.trailers = trailers;
+	    }
 
 	    res.end();
 	  }
 
-	  onError (err) {
+	  onResponseError (_controller, err) {
 	    const { res, callback, opaque, body } = this;
 
 	    removeSignal(this);
@@ -17286,40 +17307,46 @@ function requireApiPipeline () {
 	    addSignal(this, signal);
 	  }
 
-	  onConnect (abort, context) {
+	  onRequestStart (controller, context) {
 	    const { res } = this;
 
 	    if (this.reason) {
-	      abort(this.reason);
+	      controller.abort(this.reason);
 	      return
 	    }
 
 	    assert(!res, 'pipeline cannot be retried');
 
-	    this.abort = abort;
+	    this.abort = (reason) => controller.abort(reason);
 	    this.context = context;
 	  }
 
-	  onHeaders (statusCode, rawHeaders, resume) {
+	  onResponseStart (controller, statusCode, headers, _statusMessage) {
 	    const { opaque, handler, context } = this;
 
 	    if (statusCode < 200) {
 	      if (this.onInfo) {
-	        const headers = this.responseHeaders === 'raw' ? util.parseRawHeaders(rawHeaders) : util.parseHeaders(rawHeaders);
-	        this.onInfo({ statusCode, headers });
+	        const rawHeaders = controller?.rawHeaders;
+	        const responseHeaders = this.responseHeaders === 'raw'
+	          ? (Array.isArray(rawHeaders) ? util.parseRawHeaders(rawHeaders) : [])
+	          : headers;
+	        this.onInfo({ statusCode, headers: responseHeaders });
 	      }
 	      return
 	    }
 
-	    this.res = new PipelineResponse(resume);
+	    this.res = new PipelineResponse(() => controller.resume());
 
 	    let body;
 	    try {
 	      this.handler = null;
-	      const headers = this.responseHeaders === 'raw' ? util.parseRawHeaders(rawHeaders) : util.parseHeaders(rawHeaders);
+	      const rawHeaders = controller?.rawHeaders;
+	      const responseHeaders = this.responseHeaders === 'raw'
+	        ? (Array.isArray(rawHeaders) ? util.parseRawHeaders(rawHeaders) : [])
+	        : headers;
 	      body = this.runInAsyncScope(handler, null, {
 	        statusCode,
-	        headers,
+	        headers: responseHeaders,
 	        opaque,
 	        body: this.res,
 	        context
@@ -17362,17 +17389,20 @@ function requireApiPipeline () {
 	    this.body = body;
 	  }
 
-	  onData (chunk) {
+	  onResponseData (controller, chunk) {
 	    const { res } = this;
-	    return res.push(chunk)
+
+	    if (res.push(chunk) === false) {
+	      controller.pause();
+	    }
 	  }
 
-	  onComplete (trailers) {
+	  onResponseEnd (_controller, _trailers) {
 	    const { res } = this;
 	    res.push(null);
 	  }
 
-	  onError (err) {
+	  onResponseError (_controller, err) {
 	    const { ret } = this;
 	    this.handler = null;
 	    util.destroy(ret, err);
@@ -17434,23 +17464,23 @@ function requireApiUpgrade () {
 	    addSignal(this, signal);
 	  }
 
-	  onConnect (abort, context) {
+	  onRequestStart (controller, context) {
 	    if (this.reason) {
-	      abort(this.reason);
+	      controller.abort(this.reason);
 	      return
 	    }
 
 	    assert(this.callback);
 
-	    this.abort = abort;
-	    this.context = null;
+	    this.abort = (reason) => controller.abort(reason);
+	    this.context = context;
 	  }
 
-	  onHeaders () {
+	  onResponseStart () {
 	    throw new SocketError('bad upgrade', null)
 	  }
 
-	  onUpgrade (statusCode, rawHeaders, socket) {
+	  onRequestUpgrade (controller, statusCode, headers, socket) {
 	    assert(socket[kHTTP2Stream] === true ? statusCode === 200 : statusCode === 101);
 
 	    const { callback, opaque, context } = this;
@@ -17458,16 +17488,21 @@ function requireApiUpgrade () {
 	    removeSignal(this);
 
 	    this.callback = null;
-	    const headers = this.responseHeaders === 'raw' ? util.parseRawHeaders(rawHeaders) : util.parseHeaders(rawHeaders);
+
+	    const rawHeaders = controller?.rawHeaders;
+	    const responseHeaders = this.responseHeaders === 'raw'
+	      ? (Array.isArray(rawHeaders) ? util.parseRawHeaders(rawHeaders) : [])
+	      : headers;
+
 	    this.runInAsyncScope(callback, null, null, {
-	      headers,
+	      headers: responseHeaders,
 	      socket,
 	      opaque,
 	      context
 	    });
 	  }
 
-	  onError (err) {
+	  onResponseError (_controller, err) {
 	    const { callback, opaque } = this;
 
 	    removeSignal(this);
@@ -17497,7 +17532,6 @@ function requireApiUpgrade () {
 	      method: opts.method || 'GET',
 	      upgrade: opts.protocol || 'Websocket'
 	    };
-
 	    this.dispatch(upgradeOpts, upgradeHandler);
 	  } catch (err) {
 	    if (typeof callback !== 'function') {
@@ -17551,45 +17585,48 @@ function requireApiConnect () {
 	    addSignal(this, signal);
 	  }
 
-	  onConnect (abort, context) {
+	  onRequestStart (controller, context) {
 	    if (this.reason) {
-	      abort(this.reason);
+	      controller.abort(this.reason);
 	      return
 	    }
 
 	    assert(this.callback);
 
-	    this.abort = abort;
+	    this.abort = (reason) => controller.abort(reason);
 	    this.context = context;
 	  }
 
-	  onHeaders () {
+	  onResponseStart () {
 	    throw new SocketError('bad connect', null)
 	  }
 
-	  onUpgrade (statusCode, rawHeaders, socket) {
+	  onRequestUpgrade (controller, statusCode, headers, socket) {
 	    const { callback, opaque, context } = this;
 
 	    removeSignal(this);
 
 	    this.callback = null;
 
-	    let headers = rawHeaders;
+	    let responseHeaders = headers;
+	    const rawHeaders = controller?.rawHeaders;
 	    // Indicates is an HTTP2Session
-	    if (headers != null) {
-	      headers = this.responseHeaders === 'raw' ? util.parseRawHeaders(rawHeaders) : util.parseHeaders(rawHeaders);
+	    if (responseHeaders != null) {
+	      responseHeaders = this.responseHeaders === 'raw'
+	        ? (Array.isArray(rawHeaders) ? util.parseRawHeaders(rawHeaders) : [])
+	        : headers;
 	    }
 
 	    this.runInAsyncScope(callback, null, null, {
 	      statusCode,
-	      headers,
+	      headers: responseHeaders,
 	      socket,
 	      opaque,
 	      context
 	    });
 	  }
 
-	  onError (err) {
+	  onResponseError (_controller, err) {
 	    const { callback, opaque } = this;
 
 	    removeSignal(this);
@@ -17615,7 +17652,6 @@ function requireApiConnect () {
 	  try {
 	    const connectHandler = new ConnectHandler(opts, callback);
 	    const connectOptions = { ...opts, method: 'CONNECT' };
-
 	    this.dispatch(connectOptions, connectHandler);
 	  } catch (err) {
 	    if (typeof callback !== 'function') {
@@ -17715,7 +17751,8 @@ function requireMockSymbols () {
 	  kMockAgentAddCallHistoryLog: Symbol('mock agent add call history log'),
 	  kMockAgentIsCallHistoryEnabled: Symbol('mock agent is call history enabled'),
 	  kMockAgentAcceptsNonStandardSearchParameters: Symbol('mock agent accepts non standard search parameters'),
-	  kMockCallHistoryAddLog: Symbol('mock call history add log')
+	  kMockCallHistoryAddLog: Symbol('mock call history add log'),
+	  kTotalDispatchCount: Symbol('total dispatch count')
 	};
 	return mockSymbols;
 }
@@ -17733,9 +17770,10 @@ function requireMockUtils () {
 	  kMockAgent,
 	  kOriginalDispatch,
 	  kOrigin,
-	  kGetNetConnect
+	  kGetNetConnect,
+	  kTotalDispatchCount
 	} = requireMockSymbols();
-	const { serializePathWithQuery } = requireUtil$5();
+	const { serializePathWithQuery, parseHeaders } = requireUtil$5();
 	const { STATUS_CODES } = require$$2;
 	const {
 	  types: {
@@ -17933,6 +17971,8 @@ function requireMockUtils () {
 	  const replyData = typeof data === 'function' ? { callback: data } : { ...data };
 	  const newMockDispatch = { ...baseData, ...key, pending: true, data: { error: null, ...replyData } };
 	  mockDispatches.push(newMockDispatch);
+	  // Track total number of intercepts ever registered for better error messages
+	  mockDispatches[kTotalDispatchCount] = (mockDispatches[kTotalDispatchCount] || 0) + 1;
 	  return newMockDispatch
 	}
 
@@ -18035,7 +18075,7 @@ function requireMockUtils () {
 	  // If specified, trigger dispatch error
 	  if (error !== null) {
 	    deleteMockDispatch(this[kDispatches], key);
-	    handler.onError(error);
+	    handler.onResponseError(null, error);
 	    return true
 	  }
 
@@ -18043,24 +18083,35 @@ function requireMockUtils () {
 	  let aborted = false;
 	  let timer = null;
 
-	  function abort (err) {
-	    if (aborted) {
-	      return
+	  // Create the controller early so abort can use it
+	  const controller = {
+	    paused: false,
+	    rawHeaders: null,
+	    rawTrailers: null,
+	    pause () {
+	      this.paused = true;
+	    },
+	    resume () {
+	      this.paused = false;
+	    },
+	    abort: (reason) => {
+	      if (aborted) {
+	        return
+	      }
+	      aborted = true;
+
+	      // Clear the pending delayed response if any
+	      if (timer !== null) {
+	        clearTimeout(timer);
+	        timer = null;
+	      }
+
+	      handler.onResponseError?.(controller, reason);
 	    }
-	    aborted = true;
+	  };
 
-	    // Clear the pending delayed response if any
-	    if (timer !== null) {
-	      clearTimeout(timer);
-	      timer = null;
-	    }
-
-	    // Notify the handler of the abort
-	    handler.onError(err);
-	  }
-
-	  // Call onConnect to allow the handler to register the abort callback
-	  handler.onConnect?.(abort, null);
+	  // Call onRequestStart to allow the handler to receive the controller
+	  handler.onRequestStart?.(controller, null);
 
 	  // Handle the request with a delay if necessary
 	  if (typeof delay === 'number' && delay > 0) {
@@ -18105,13 +18156,15 @@ function requireMockUtils () {
 	    const responseHeaders = generateKeyValues(headers);
 	    const responseTrailers = generateKeyValues(trailers);
 
-	    handler.onHeaders?.(statusCode, responseHeaders, resume, getStatusText(statusCode));
-	    handler.onData?.(Buffer.from(responseData));
-	    handler.onComplete?.(responseTrailers);
+	    // Update the controller with response data
+	    controller.rawHeaders = responseHeaders;
+	    controller.rawTrailers = responseTrailers;
+
+	    handler.onResponseStart?.(controller, statusCode, parseHeaders(responseHeaders), getStatusText(statusCode));
+	    handler.onResponseData?.(controller, Buffer.from(responseData));
+	    handler.onResponseEnd?.(controller, parseHeaders(responseTrailers));
 	    deleteMockDispatch(mockDispatches, key);
 	  }
-
-	  function resume () {}
 
 	  return true
 	}
@@ -18128,13 +18181,16 @@ function requireMockUtils () {
 	      } catch (error) {
 	        if (error.code === 'UND_MOCK_ERR_MOCK_NOT_MATCHED') {
 	          const netConnect = agent[kGetNetConnect]();
+	          const totalInterceptsCount = this[kDispatches][kTotalDispatchCount] || this[kDispatches].length;
+	          const pendingInterceptsCount = this[kDispatches].filter(({ consumed }) => !consumed).length;
+	          const interceptsMessage = `, ${pendingInterceptsCount} interceptor(s) remaining out of ${totalInterceptsCount} defined`;
 	          if (netConnect === false) {
-	            throw new MockNotMatchedError(`${error.message}: subsequent request to origin ${origin} was not allowed (net.connect disabled)`)
+	            throw new MockNotMatchedError(`${error.message}: subsequent request to origin ${origin} was not allowed (net.connect disabled)${interceptsMessage}`)
 	          }
 	          if (checkNetConnect(netConnect, origin)) {
 	            originalDispatch.call(this, opts, handler);
 	          } else {
-	            throw new MockNotMatchedError(`${error.message}: subsequent request to origin ${origin} was not allowed (net.connect is not enabled for this origin)`)
+	            throw new MockNotMatchedError(`${error.message}: subsequent request to origin ${origin} was not allowed (net.connect is not enabled for this origin)${interceptsMessage}`)
 	          }
 	        } else {
 	          throw error
@@ -19299,7 +19355,7 @@ function requireSnapshotRecorder () {
 	if (hasRequiredSnapshotRecorder) return snapshotRecorder;
 	hasRequiredSnapshotRecorder = 1;
 
-	const { writeFile, readFile, mkdir } = require$$0$6;
+	const { writeFile, readFile, mkdir } = require$$0$7;
 	const { dirname, resolve } = require$$1$5;
 	const { setTimeout, clearTimeout } = require$$2$3;
 	const { InvalidArgumentError, UndiciError } = requireErrors();
@@ -19898,8 +19954,8 @@ function requireSnapshotAgent () {
 	const Agent = requireAgent();
 	const MockAgent = requireMockAgent();
 	const { SnapshotRecorder } = requireSnapshotRecorder();
-	const WrapHandler = requireWrapHandler();
 	const { InvalidArgumentError, UndiciError } = requireErrors();
+	const util = requireUtil$5();
 	const { validateSnapshotMode } = requireSnapshotUtils();
 
 	const kSnapshotRecorder = Symbol('kSnapshotRecorder');
@@ -19974,7 +20030,6 @@ function requireSnapshotAgent () {
 	  }
 
 	  dispatch (opts, handler) {
-	    handler = WrapHandler.wrap(handler);
 	    const mode = this[kSnapshotMode];
 
 	    // Check if URL should be excluded (pass through without mocking/recording)
@@ -20002,8 +20057,8 @@ function requireSnapshotAgent () {
 	      } else {
 	        // Playback mode but no snapshot found
 	        const error = new UndiciError(`No snapshot found for ${opts.method || 'GET'} ${opts.path}`);
-	        if (handler.onError) {
-	          handler.onError(error);
+	        if (handler.onResponseError) {
+	          handler.onResponseError(null, error);
 	          return
 	        }
 	        throw error
@@ -20068,6 +20123,10 @@ function requireSnapshotAgent () {
 	        })
 	          .then(() => handler.onResponseEnd(controller, trailers))
 	          .catch((error) => handler.onResponseError(controller, error));
+	      },
+
+	      onResponseError (controller, error) {
+	        return handler.onResponseError(controller, error)
 	      }
 	    };
 
@@ -20087,7 +20146,12 @@ function requireSnapshotAgent () {
 	    try {
 	      const { response } = snapshot;
 
+	      const rawHeaders = response.headers ? util.toRawHeaders(response.headers) : [];
+	      const rawTrailers = response.trailers ? util.toRawHeaders(response.trailers) : [];
+
 	      const controller = {
+	        rawHeaders,
+	        rawTrailers,
 	        pause () { },
 	        resume () { },
 	        abort (reason) {
@@ -20101,7 +20165,7 @@ function requireSnapshotAgent () {
 
 	      handler.onRequestStart(controller);
 
-	      handler.onResponseStart(controller, response.statusCode, response.headers);
+	      handler.onResponseStart(controller, response.statusCode, response.headers, response.statusMessage);
 
 	      // Body is always stored as base64 string
 	      const body = Buffer.from(response.body, 'base64');
@@ -20109,7 +20173,7 @@ function requireSnapshotAgent () {
 
 	      handler.onResponseEnd(controller, response.trailers);
 	    } catch (error) {
-	      handler.onError?.(error);
+	      handler.onResponseError?.(null, error);
 	    }
 	  }
 
@@ -20258,9 +20322,11 @@ function requireGlobal () {
 
 	// We include a version number for the Dispatcher API. In case of breaking changes,
 	// this version number must be increased to avoid conflicts.
-	const globalDispatcher = Symbol.for('undici.globalDispatcher.1');
+	const globalDispatcher = Symbol.for('undici.globalDispatcher.2');
+	const legacyGlobalDispatcher = Symbol.for('undici.globalDispatcher.1');
 	const { InvalidArgumentError } = requireErrors();
 	const Agent = requireAgent();
+	const Dispatcher1Wrapper = requireDispatcher1Wrapper();
 
 	if (getGlobalDispatcher() === undefined) {
 	  setGlobalDispatcher(new Agent());
@@ -20270,8 +20336,18 @@ function requireGlobal () {
 	  if (!agent || typeof agent.dispatch !== 'function') {
 	    throw new InvalidArgumentError('Argument agent must implement Agent')
 	  }
+
 	  Object.defineProperty(globalThis, globalDispatcher, {
 	    value: agent,
+	    writable: true,
+	    enumerable: false,
+	    configurable: false
+	  });
+
+	  const legacyAgent = agent instanceof Dispatcher1Wrapper ? agent : new Dispatcher1Wrapper(agent);
+
+	  Object.defineProperty(globalThis, legacyGlobalDispatcher, {
+	    value: legacyAgent,
 	    writable: true,
 	    enumerable: false,
 	    configurable: false
@@ -20315,7 +20391,6 @@ function requireDecoratorHandler () {
 	hasRequiredDecoratorHandler = 1;
 
 	const assert = require$$0$1;
-	const WrapHandler = requireWrapHandler();
 
 	/**
 	 * @deprecated
@@ -20330,7 +20405,7 @@ function requireDecoratorHandler () {
 	    if (typeof handler !== 'object' || handler === null) {
 	      throw new TypeError('handler must be an object')
 	    }
-	    this.#handler = WrapHandler.wrap(handler);
+	    this.#handler = handler;
 	  }
 
 	  onRequestStart (...args) {
@@ -20390,29 +20465,12 @@ function requireRedirectHandler () {
 	hasRequiredRedirectHandler = 1;
 
 	const util = requireUtil$5();
-	const { kBodyUsed } = requireSymbols();
 	const assert = require$$0$1;
 	const { InvalidArgumentError } = requireErrors();
-	const EE = require$$0;
 
 	const redirectableStatusCodes = [300, 301, 302, 303, 307, 308];
 
-	const kBody = Symbol('body');
-
 	const noop = () => {};
-
-	class BodyAsyncIterable {
-	  constructor (body) {
-	    this[kBody] = body;
-	    this[kBodyUsed] = false;
-	  }
-
-	  async * [Symbol.asyncIterator] () {
-	    assert(!this[kBodyUsed], 'disturbed');
-	    this[kBodyUsed] = true;
-	    yield * this[kBody];
-	  }
-	}
 
 	class RedirectHandler {
 	  static buildDispatch (dispatcher, maxRedirections) {
@@ -20433,43 +20491,10 @@ function requireRedirectHandler () {
 	    this.location = null;
 	    const { maxRedirections: _, ...cleanOpts } = opts;
 	    this.opts = cleanOpts; // opts must be a copy, exclude maxRedirections
+	    this.opts.body = util.wrapRequestBody(this.opts.body);
 	    this.maxRedirections = maxRedirections;
 	    this.handler = handler;
 	    this.history = [];
-
-	    if (util.isStream(this.opts.body)) {
-	      // TODO (fix): Provide some way for the user to cache the file to e.g. /tmp
-	      // so that it can be dispatched again?
-	      // TODO (fix): Do we need 100-expect support to provide a way to do this properly?
-	      if (util.bodyLength(this.opts.body) === 0) {
-	        this.opts.body
-	          .on('data', function () {
-	            assert(false);
-	          });
-	      }
-
-	      if (typeof this.opts.body.readableDidRead !== 'boolean') {
-	        this.opts.body[kBodyUsed] = false;
-	        EE.prototype.on.call(this.opts.body, 'data', function () {
-	          this[kBodyUsed] = true;
-	        });
-	      }
-	    } else if (this.opts.body && typeof this.opts.body.pipeTo === 'function') {
-	      // TODO (fix): We can't access ReadableStream internal state
-	      // to determine whether or not it has been disturbed. This is just
-	      // a workaround.
-	      this.opts.body = new BodyAsyncIterable(this.opts.body);
-	    } else if (
-	      this.opts.body &&
-	      typeof this.opts.body !== 'string' &&
-	      !ArrayBuffer.isView(this.opts.body) &&
-	      util.isIterable(this.opts.body) &&
-	      !util.isFormDataLike(this.opts.body)
-	    ) {
-	      // TODO: Should we allow re-using iterable if !this.opts.idempotent
-	      // or through some other flag?
-	      this.opts.body = new BodyAsyncIterable(this.opts.body);
-	    }
 	  }
 
 	  onRequestStart (controller, context) {
@@ -20903,7 +20928,7 @@ function requireDns () {
 
 	function hasSafeIterator (headers) {
 	  const prototype = Object.getPrototypeOf(headers);
-	  const ownIterator = Object.prototype.hasOwnProperty.call(headers, Symbol.iterator);
+	  const ownIterator = Object.hasOwn(headers, Symbol.iterator);
 	  return ownIterator || (prototype != null && prototype !== Object.prototype && typeof headers[Symbol.iterator] === 'function')
 	}
 
@@ -21849,9 +21874,11 @@ function requireCache$2 () {
 	 * @returns {string}
 	 */
 	function makeDeduplicationKey (cacheKey, excludeHeaders) {
-	  // Create a deterministic string key from the cache key
-	  // Include origin, method, path, and sorted headers
-	  let key = `${cacheKey.origin}:${cacheKey.method}:${cacheKey.path}`;
+	  // Use JSON.stringify to produce a collision-resistant key.
+	  // Previous format used `:` and `=` delimiters without escaping, which
+	  // allowed different header sets to produce identical keys (e.g.
+	  // {a:"x:b=y"} vs {a:"x", b:"y"}). See: https://github.com/nodejs/undici/issues/5012
+	  const headers = {};
 
 	  if (cacheKey.headers) {
 	    const sortedHeaders = Object.keys(cacheKey.headers).sort();
@@ -21860,12 +21887,11 @@ function requireCache$2 () {
 	      if (excludeHeaders?.has(header.toLowerCase())) {
 	        continue
 	      }
-	      const value = cacheKey.headers[header];
-	      key += `:${header}=${Array.isArray(value) ? value.join(',') : value}`;
+	      headers[header] = cacheKey.headers[header];
 	    }
 	  }
 
-	  return key
+	  return JSON.stringify([cacheKey.origin, cacheKey.method, cacheKey.path, headers])
 	}
 
 	cache$2 = {
@@ -22686,7 +22712,7 @@ function requireCacheHandler () {
 	    }
 
 	    const cacheControlDirectives = cacheControlHeader ? parseCacheControlHeader(cacheControlHeader) : {};
-	    if (!canCacheResponse(this.#cacheType, statusCode, resHeaders, cacheControlDirectives)) {
+	    if (!canCacheResponse(this.#cacheType, statusCode, resHeaders, cacheControlDirectives, this.#cacheKey.headers)) {
 	      return downstreamOnHeaders()
 	    }
 
@@ -22724,7 +22750,8 @@ function requireCacheHandler () {
 	      }
 	    }
 
-	    const deleteAt = determineDeleteAt(baseTime, cacheControlDirectives, absoluteStaleAt);
+	    const cachedAt = resAge ? now - resAge : now;
+	    const deleteAt = determineDeleteAt(baseTime, cachedAt, cacheControlDirectives, absoluteStaleAt);
 	    const strippedHeaders = stripNecessaryHeaders(resHeaders, cacheControlDirectives);
 
 	    /**
@@ -22736,7 +22763,7 @@ function requireCacheHandler () {
 	      headers: strippedHeaders,
 	      vary: varyDirectives,
 	      cacheControlDirectives,
-	      cachedAt: resAge ? now - resAge : now,
+	      cachedAt,
 	      staleAt: absoluteStaleAt,
 	      deleteAt
 	    };
@@ -22891,8 +22918,9 @@ function requireCacheHandler () {
 	 * @param {number} statusCode
 	 * @param {import('../../types/header.d.ts').IncomingHttpHeaders} resHeaders
 	 * @param {import('../../types/cache-interceptor.d.ts').default.CacheControlDirectives} cacheControlDirectives
+	 * @param {import('../../types/header.d.ts').IncomingHttpHeaders} [reqHeaders]
 	 */
-	function canCacheResponse (cacheType, statusCode, resHeaders, cacheControlDirectives) {
+	function canCacheResponse (cacheType, statusCode, resHeaders, cacheControlDirectives, reqHeaders) {
 	  // Status code must be final and understood.
 	  if (statusCode < 200 || NOT_UNDERSTOOD_STATUS_CODES.includes(statusCode)) {
 	    return false
@@ -22923,8 +22951,16 @@ function requireCacheHandler () {
 	  }
 
 	  // https://www.rfc-editor.org/rfc/rfc9111.html#name-storing-responses-to-authen
-	  if (resHeaders.authorization) {
-	    if (!cacheControlDirectives.public || typeof resHeaders.authorization !== 'string') {
+	  if (reqHeaders?.authorization) {
+	    if (
+	      !cacheControlDirectives.public &&
+	      !cacheControlDirectives['s-maxage'] &&
+	      !cacheControlDirectives['must-revalidate']
+	    ) {
+	      return false
+	    }
+
+	    if (typeof reqHeaders.authorization !== 'string') {
 	      return false
 	    }
 
@@ -23027,11 +23063,12 @@ function requireCacheHandler () {
 	}
 
 	/**
-	 * @param {number} now
+	 * @param {number} baseTime
+	 * @param {number} cachedAt
 	 * @param {import('../../types/cache-interceptor.d.ts').default.CacheControlDirectives} cacheControlDirectives
 	 * @param {number} staleAt
 	 */
-	function determineDeleteAt (now, cacheControlDirectives, staleAt) {
+	function determineDeleteAt (baseTime, cachedAt, cacheControlDirectives, staleAt) {
 	  let staleWhileRevalidate = -Infinity;
 	  let staleIfError = -Infinity;
 	  let immutable = -Infinity;
@@ -23044,8 +23081,22 @@ function requireCacheHandler () {
 	    staleIfError = staleAt + (cacheControlDirectives['stale-if-error'] * 1000);
 	  }
 
-	  if (staleWhileRevalidate === -Infinity && staleIfError === -Infinity) {
-	    immutable = now + 31536000000;
+	  if (cacheControlDirectives.immutable && staleWhileRevalidate === -Infinity && staleIfError === -Infinity) {
+	    immutable = cachedAt + 31536000000;
+	  }
+
+	  // When no stale directives or immutable flag, add a revalidation buffer
+	  // equal to the freshness lifetime so the entry survives past staleAt long
+	  // enough to be revalidated instead of silently disappearing.
+	  //
+	  // Response Date headers only have second precision, so baseTime can trail the
+	  // actual cache insertion time by up to ~1s. Pad the buffer by that bounded
+	  // skew so short-lived entries do not disappear exactly when they should be
+	  // revalidated.
+	  if (staleWhileRevalidate === -Infinity && staleIfError === -Infinity && immutable === -Infinity) {
+	    const freshnessLifetime = staleAt - baseTime;
+	    const datePrecisionPadding = Math.min(Math.max(cachedAt - baseTime, 0), 1000);
+	    return staleAt + freshnessLifetime + datePrecisionPadding
 	  }
 
 	  return Math.max(staleAt, staleWhileRevalidate, staleIfError, immutable)
@@ -23618,30 +23669,39 @@ function requireCache$1 () {
 	) {
 	  if (reqCacheControl?.['only-if-cached']) {
 	    let aborted = false;
+
+	    const controller = {
+	      paused: false,
+	      rawHeaders: [],
+	      rawTrailers: [],
+	      pause () {
+	        this.paused = true;
+	      },
+	      resume () {
+	        this.paused = false;
+	      },
+	      abort: (reason) => {
+	        aborted = true;
+	        handler.onResponseError?.(controller, reason ?? new AbortError());
+	      }
+	    };
+
 	    try {
-	      if (typeof handler.onConnect === 'function') {
-	        handler.onConnect(() => {
-	          aborted = true;
-	        });
+	      handler.onRequestStart?.(controller, null);
 
-	        if (aborted) {
-	          return
-	        }
+	      if (aborted) {
+	        return
 	      }
 
-	      if (typeof handler.onHeaders === 'function') {
-	        handler.onHeaders(504, [], nop, 'Gateway Timeout');
-	        if (aborted) {
-	          return
-	        }
+	      handler.onResponseStart?.(controller, 504, {}, 'Gateway Timeout');
+	      if (aborted) {
+	        return
 	      }
 
-	      if (typeof handler.onComplete === 'function') {
-	        handler.onComplete([]);
-	      }
+	      handler.onResponseEnd?.(controller, {});
 	    } catch (err) {
-	      if (typeof handler.onError === 'function') {
-	        handler.onError(err);
+	      if (typeof handler.onResponseError === 'function') {
+	        handler.onResponseError(controller, err);
 	      }
 	    }
 
@@ -23669,6 +23729,8 @@ function requireCache$1 () {
 	  assert(!stream.readableDidRead, 'stream should not be readableDidRead');
 
 	  const controller = {
+	    rawHeaders: [],
+	    rawTrailers: [],
 	    resume () {
 	      stream.resume();
 	    },
@@ -23720,6 +23782,8 @@ function requireCache$1 () {
 	    //  https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Warning
 	    headers.warning = '110 - "response is stale"';
 	  }
+
+	  controller.rawHeaders = util.toRawHeaders(headers);
 
 	  handler.onResponseStart?.(controller, result.statusCode, headers, result.statusMessage);
 
@@ -23997,10 +24061,9 @@ function requireDecompress () {
 	if (hasRequiredDecompress) return decompress;
 	hasRequiredDecompress = 1;
 
-	const { createInflate, createGunzip, createBrotliDecompress, createZstdDecompress } = require$$3$1;
+	const { createInflate, createGunzip, createBrotliDecompress, createZstdDecompress } = require$$0$6;
 	const { pipeline } = require$$0$2;
 	const DecoratorHandler = requireDecoratorHandler();
-	const { runtimeFeatures } = requireRuntimeFeatures();
 
 	/** @typedef {import('node:stream').Transform} Transform */
 	/** @typedef {import('node:stream').Transform} Controller */
@@ -24014,7 +24077,7 @@ function requireDecompress () {
 	  deflate: createInflate,
 	  compress: createInflate,
 	  'x-compress': createInflate,
-	  ...(runtimeFeatures.has('zstd') ? { zstd: createZstdDecompress } : {})
+	  zstd: createZstdDecompress
 	};
 
 	const defaultSkipStatusCodes = /** @type {const} */ ([204, 304]);
@@ -24177,6 +24240,33 @@ function requireDecompress () {
 
 	    // Remove compression headers since we're decompressing
 	    const { 'content-encoding': _, 'content-length': __, ...newHeaders } = headers;
+
+	    if (controller?.rawHeaders) {
+	      const rawHeaders = controller.rawHeaders;
+
+	      if (Array.isArray(rawHeaders)) {
+	        const filteredHeaders = [];
+	        for (let i = 0; i < rawHeaders.length; i += 2) {
+	          const headerName = rawHeaders[i];
+	          const name = Buffer.isBuffer(headerName) ? headerName.toString('latin1') : `${headerName}`;
+	          const lowerName = name.toLowerCase();
+
+	          if (lowerName === 'content-encoding' || lowerName === 'content-length') {
+	            continue
+	          }
+
+	          filteredHeaders.push(rawHeaders[i], rawHeaders[i + 1]);
+	        }
+	        controller.rawHeaders = filteredHeaders;
+	      } else if (typeof rawHeaders === 'object') {
+	        for (const name of Object.keys(rawHeaders)) {
+	          const lowerName = name.toLowerCase();
+	          if (lowerName === 'content-encoding' || lowerName === 'content-length') {
+	            delete rawHeaders[name];
+	          }
+	        }
+	      }
+	    }
 
 	    if (this.#decompressors.length === 1) {
 	      this.#setupSingleDecompressor(controller);
@@ -28148,7 +28238,7 @@ function requireFetch () {
 	} = requireResponse();
 	const { HeadersList } = requireHeaders();
 	const { Request, cloneRequest, getRequestDispatcher, getRequestState } = requireRequest();
-	const zlib = require$$3$1;
+	const zlib = require$$0$6;
 	const {
 	  makePolicyContainer,
 	  clonePolicyContainer,
@@ -28200,12 +28290,7 @@ function requireFetch () {
 	const { webidl } = requireWebidl();
 	const { STATUS_CODES } = require$$2;
 	const { bytesMatch } = requireSubresourceIntegrity();
-	const { createDeferredPromise } = requirePromise();
 	const { isomorphicEncode } = requireInfra();
-	const { runtimeFeatures } = requireRuntimeFeatures();
-
-	// Node.js v23.8.0+ and v22.15.0+ supports Zstandard
-	const hasZstd = runtimeFeatures.has('zstd');
 
 	const GET_OR_HEAD = ['GET', 'HEAD'];
 
@@ -28272,7 +28357,7 @@ function requireFetch () {
 	  webidl.argumentLengthCheck(arguments, 1, 'globalThis.fetch');
 
 	  // 1. Let p be a new promise.
-	  let p = createDeferredPromise();
+	  let p = Promise.withResolvers();
 
 	  // 2. Let requestObject be the result of invoking the initial value of
 	  // Request as constructor with input and init as arguments. If this throws
@@ -29751,12 +29836,25 @@ function requireFetch () {
 	  // 14. If response’s status is 401, httpRequest’s response tainting is not "cors",
 	  //     includeCredentials is true, and request’s traversable for user prompts is
 	  //     a traversable navigable:
-	  if (response.status === 401 && httpRequest.responseTainting !== 'cors' && includeCredentials && isTraversableNavigable(request.traversableForUserPrompts)) {
+	  //
+	  //     In Node.js there is no traversable navigable to prompt the user, but we
+	  //     still need to handle URL-embedded credentials so authentication retries
+	  //     for WebSocket handshakes continue to work.
+	  if (response.status === 401 && httpRequest.responseTainting !== 'cors' && includeCredentials && (
+	    request.useURLCredentials !== undefined ||
+	    isTraversableNavigable(request.traversableForUserPrompts)
+	  )) {
 	    // 2. If request’s body is non-null, then:
 	    if (request.body != null) {
 	      // 1. If request’s body’s source is null, then return a network error.
 	      if (request.body.source == null) {
-	        return makeNetworkError('expected non-null body source')
+	        // Note: In Node.js, this code path should not be reached because
+	        // isTraversableNavigable() returns false for non-navigable contexts.
+	        // However, we handle it gracefully by returning the response instead of
+	        // a network error, as we won't actually retry the request.
+	        // This aligns with the Fetch spec discussion in whatwg/fetch#1132,
+	        // which allows implementations flexibility when credentials can't be obtained.
+	        return response
 	      }
 
 	      // 2. Set request’s body to the body of the result of safely extracting
@@ -30215,241 +30313,243 @@ function requireFetch () {
 	    const path = url.pathname + url.search;
 	    const hasTrailingQuestionMark = url.search.length === 0 && url.href[url.href.length - url.hash.length - 1] === '?';
 
-	    return new Promise((resolve, reject) => agent.dispatch(
-	      {
-	        path: hasTrailingQuestionMark ? `${path}?` : path,
-	        origin: url.origin,
-	        method: request.method,
-	        body: agent.isMockActive ? request.body && (request.body.source || request.body.stream) : body,
-	        headers: request.headersList.entries,
-	        maxRedirections: 0,
-	        upgrade: request.mode === 'websocket' ? 'websocket' : undefined
-	      },
-	      {
-	        body: null,
-	        abort: null,
+	    return dispatchWithProtocolPreference(body)
 
-	        onConnect (abort) {
-	          // TODO (fix): Do we need connection here?
-	          const { connection } = fetchParams.controller;
-
-	          // Set timingInfo’s final connection timing info to the result of calling clamp and coarsen
-	          // connection timing info with connection’s timing info, timingInfo’s post-redirect start
-	          // time, and fetchParams’s cross-origin isolated capability.
-	          // TODO: implement connection timing
-	          timingInfo.finalConnectionTimingInfo = clampAndCoarsenConnectionTimingInfo(undefined, timingInfo.postRedirectStartTime, fetchParams.crossOriginIsolatedCapability);
-
-	          if (connection.destroyed) {
-	            abort(new DOMException('The operation was aborted.', 'AbortError'));
-	          } else {
-	            fetchParams.controller.on('terminated', abort);
-	            this.abort = connection.abort = abort;
-	          }
-
-	          // Set timingInfo’s final network-request start time to the coarsened shared current time given
-	          // fetchParams’s cross-origin isolated capability.
-	          timingInfo.finalNetworkRequestStartTime = coarsenedSharedCurrentTime(fetchParams.crossOriginIsolatedCapability);
+	    function dispatchWithProtocolPreference (body, allowH2) {
+	      return new Promise((resolve, reject) => agent.dispatch(
+	        {
+	          path: hasTrailingQuestionMark ? `${path}?` : path,
+	          origin: url.origin,
+	          method: request.method,
+	          body: agent.isMockActive ? request.body && (request.body.source || request.body.stream) : body,
+	          headers: request.headersList.entries,
+	          maxRedirections: 0,
+	          upgrade: request.mode === 'websocket' ? 'websocket' : undefined,
+	          ...(allowH2 === false ? { allowH2 } : null)
 	        },
+	        {
+	          body: null,
+	          abort: null,
 
-	        onResponseStarted () {
-	          // Set timingInfo’s final network-response start time to the coarsened shared current
-	          // time given fetchParams’s cross-origin isolated capability, immediately after the
-	          // user agent’s HTTP parser receives the first byte of the response (e.g., frame header
-	          // bytes for HTTP/2 or response status line for HTTP/1.x).
-	          timingInfo.finalNetworkResponseStartTime = coarsenedSharedCurrentTime(fetchParams.crossOriginIsolatedCapability);
-	        },
+	          onRequestStart (controller) {
+	            // TODO (fix): Do we need connection here?
+	            const { connection } = fetchParams.controller;
 
-	        onHeaders (status, rawHeaders, resume, statusText) {
-	          if (status < 200) {
-	            return false
-	          }
+	            // Set timingInfo’s final connection timing info to the result of calling clamp and coarsen
+	            // connection timing info with connection’s timing info, timingInfo’s post-redirect start
+	            // time, and fetchParams’s cross-origin isolated capability.
+	            // TODO: implement connection timing
+	            timingInfo.finalConnectionTimingInfo = clampAndCoarsenConnectionTimingInfo(undefined, timingInfo.postRedirectStartTime, fetchParams.crossOriginIsolatedCapability);
 
-	          const headersList = new HeadersList();
+	            const abort = (reason) => controller.abort(reason);
 
-	          for (let i = 0; i < rawHeaders.length; i += 2) {
-	            headersList.append(bufferToLowerCasedHeaderName(rawHeaders[i]), rawHeaders[i + 1].toString('latin1'), true);
-	          }
-	          const location = headersList.get('location', true);
-
-	          this.body = new Readable({ read: resume });
-
-	          const willFollow = location && request.redirect === 'follow' &&
-	            redirectStatusSet.has(status);
-
-	          const decoders = [];
-
-	          // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Encoding
-	          if (request.method !== 'HEAD' && request.method !== 'CONNECT' && !nullBodyStatus.includes(status) && !willFollow) {
-	            // https://www.rfc-editor.org/rfc/rfc7231#section-3.1.2.1
-	            const contentEncoding = headersList.get('content-encoding', true);
-	            // "All content-coding values are case-insensitive..."
-	            /** @type {string[]} */
-	            const codings = contentEncoding ? contentEncoding.toLowerCase().split(',') : [];
-
-	            // Limit the number of content-encodings to prevent resource exhaustion.
-	            // CVE fix similar to urllib3 (GHSA-gm62-xv2j-4w53) and curl (CVE-2022-32206).
-	            const maxContentEncodings = 5;
-	            if (codings.length > maxContentEncodings) {
-	              reject(new Error(`too many content-encodings in response: ${codings.length}, maximum allowed is ${maxContentEncodings}`));
-	              return true
-	            }
-
-	            for (let i = codings.length - 1; i >= 0; --i) {
-	              const coding = codings[i].trim();
-	              // https://www.rfc-editor.org/rfc/rfc9112.html#section-7.2
-	              if (coding === 'x-gzip' || coding === 'gzip') {
-	                decoders.push(zlib.createGunzip({
-	                  // Be less strict when decoding compressed responses, since sometimes
-	                  // servers send slightly invalid responses that are still accepted
-	                  // by common browsers.
-	                  // Always using Z_SYNC_FLUSH is what cURL does.
-	                  flush: zlib.constants.Z_SYNC_FLUSH,
-	                  finishFlush: zlib.constants.Z_SYNC_FLUSH
-	                }));
-	              } else if (coding === 'deflate') {
-	                decoders.push(createInflate({
-	                  flush: zlib.constants.Z_SYNC_FLUSH,
-	                  finishFlush: zlib.constants.Z_SYNC_FLUSH
-	                }));
-	              } else if (coding === 'br') {
-	                decoders.push(zlib.createBrotliDecompress({
-	                  flush: zlib.constants.BROTLI_OPERATION_FLUSH,
-	                  finishFlush: zlib.constants.BROTLI_OPERATION_FLUSH
-	                }));
-	              } else if (coding === 'zstd' && hasZstd) {
-	                decoders.push(zlib.createZstdDecompress({
-	                  flush: zlib.constants.ZSTD_e_continue,
-	                  finishFlush: zlib.constants.ZSTD_e_end
-	                }));
-	              } else {
-	                decoders.length = 0;
-	                break
-	              }
-	            }
-	          }
-
-	          const onError = this.onError.bind(this);
-
-	          resolve({
-	            status,
-	            statusText,
-	            headersList,
-	            body: decoders.length
-	              ? pipeline(this.body, ...decoders, (err) => {
-	                if (err) {
-	                  this.onError(err);
-	                }
-	              }).on('error', onError)
-	              : this.body.on('error', onError)
-	          });
-
-	          return true
-	        },
-
-	        onData (chunk) {
-	          if (fetchParams.controller.dump) {
-	            return
-	          }
-
-	          // 1. If one or more bytes have been transmitted from response’s
-	          // message body, then:
-
-	          //  1. Let bytes be the transmitted bytes.
-	          const bytes = chunk;
-
-	          //  2. Let codings be the result of extracting header list values
-	          //  given `Content-Encoding` and response’s header list.
-	          //  See pullAlgorithm.
-
-	          //  3. Increase timingInfo’s encoded body size by bytes’s length.
-	          timingInfo.encodedBodySize += bytes.byteLength;
-
-	          //  4. See pullAlgorithm...
-
-	          return this.body.push(bytes)
-	        },
-
-	        onComplete () {
-	          if (this.abort) {
-	            fetchParams.controller.off('terminated', this.abort);
-	          }
-
-	          fetchParams.controller.ended = true;
-
-	          this.body.push(null);
-	        },
-
-	        onError (error) {
-	          if (this.abort) {
-	            fetchParams.controller.off('terminated', this.abort);
-	          }
-
-	          this.body?.destroy(error);
-
-	          fetchParams.controller.terminate(error);
-
-	          reject(error);
-	        },
-
-	        onRequestUpgrade (_controller, status, headers, socket) {
-	          // We need to support 200 for websocket over h2 as per RFC-8441
-	          // Absence of session means H1
-	          if ((socket.session != null && status !== 200) || (socket.session == null && status !== 101)) {
-	            return false
-	          }
-
-	          const headersList = new HeadersList();
-
-	          for (const [name, value] of Object.entries(headers)) {
-	            if (value == null) {
-	              continue
-	            }
-
-	            const headerName = name.toLowerCase();
-
-	            if (Array.isArray(value)) {
-	              for (const entry of value) {
-	                headersList.append(headerName, String(entry), true);
-	              }
+	            if (connection.destroyed) {
+	              abort(new DOMException('The operation was aborted.', 'AbortError'));
 	            } else {
-	              headersList.append(headerName, String(value), true);
+	              fetchParams.controller.on('terminated', abort);
+	              this.abort = connection.abort = abort;
 	            }
+
+	            // Set timingInfo’s final network-request start time to the coarsened shared current time given
+	            // fetchParams’s cross-origin isolated capability.
+	            timingInfo.finalNetworkRequestStartTime = coarsenedSharedCurrentTime(fetchParams.crossOriginIsolatedCapability);
+	          },
+
+	          onResponseStarted () {
+	            // Set timingInfo’s final network-response start time to the coarsened shared current
+	            // time given fetchParams’s cross-origin isolated capability, immediately after the
+	            // user agent’s HTTP parser receives the first byte of the response (e.g., frame header
+	            // bytes for HTTP/2 or response status line for HTTP/1.x).
+	            timingInfo.finalNetworkResponseStartTime = coarsenedSharedCurrentTime(fetchParams.crossOriginIsolatedCapability);
+	          },
+
+	          onResponseStart (controller, status, _headers, statusText) {
+	            if (status < 200) {
+	              return
+	            }
+
+	            const rawHeaders = controller?.rawHeaders ?? [];
+	            const headersList = new HeadersList();
+
+	            for (let i = 0; i < rawHeaders.length; i += 2) {
+	              const nameStr = bufferToLowerCasedHeaderName(rawHeaders[i]);
+	              const value = rawHeaders[i + 1];
+	              if (Array.isArray(value) && !Buffer.isBuffer(rawHeaders[i + 1])) {
+	                for (const val of value) {
+	                  headersList.append(nameStr, val.toString('latin1'), true);
+	                }
+	              } else {
+	                headersList.append(nameStr, value.toString('latin1'), true);
+	              }
+	            }
+	            const location = headersList.get('location', true);
+
+	            this.body = new Readable({ read: () => controller.resume() });
+
+	            const willFollow = location && request.redirect === 'follow' &&
+	              redirectStatusSet.has(status);
+
+	            const decoders = [];
+
+	            // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Encoding
+	            if (request.method !== 'HEAD' && request.method !== 'CONNECT' && !nullBodyStatus.includes(status) && !willFollow) {
+	              // https://www.rfc-editor.org/rfc/rfc7231#section-3.1.2.1
+	              const contentEncoding = headersList.get('content-encoding', true);
+	              // "All content-coding values are case-insensitive..."
+	              /** @type {string[]} */
+	              const codings = contentEncoding ? contentEncoding.toLowerCase().split(',') : [];
+
+	              // Limit the number of content-encodings to prevent resource exhaustion.
+	              // CVE fix similar to urllib3 (GHSA-gm62-xv2j-4w53) and curl (CVE-2022-32206).
+	              const maxContentEncodings = 5;
+	              if (codings.length > maxContentEncodings) {
+	                reject(new Error(`too many content-encodings in response: ${codings.length}, maximum allowed is ${maxContentEncodings}`));
+	                return
+	              }
+
+	              for (let i = codings.length - 1; i >= 0; --i) {
+	                const coding = codings[i].trim();
+	                // https://www.rfc-editor.org/rfc/rfc9112.html#section-7.2
+	                if (coding === 'x-gzip' || coding === 'gzip') {
+	                  decoders.push(zlib.createGunzip({
+	                    // Be less strict when decoding compressed responses, since sometimes
+	                    // servers send slightly invalid responses that are still accepted
+	                    // by common browsers.
+	                    // Always using Z_SYNC_FLUSH is what cURL does.
+	                    flush: zlib.constants.Z_SYNC_FLUSH,
+	                    finishFlush: zlib.constants.Z_SYNC_FLUSH
+	                  }));
+	                } else if (coding === 'deflate') {
+	                  decoders.push(createInflate({
+	                    flush: zlib.constants.Z_SYNC_FLUSH,
+	                    finishFlush: zlib.constants.Z_SYNC_FLUSH
+	                  }));
+	                } else if (coding === 'br') {
+	                  decoders.push(zlib.createBrotliDecompress({
+	                    flush: zlib.constants.BROTLI_OPERATION_FLUSH,
+	                    finishFlush: zlib.constants.BROTLI_OPERATION_FLUSH
+	                  }));
+	                } else if (coding === 'zstd') {
+	                  decoders.push(zlib.createZstdDecompress({
+	                    flush: zlib.constants.ZSTD_e_continue,
+	                    finishFlush: zlib.constants.ZSTD_e_end
+	                  }));
+	                } else {
+	                  decoders.length = 0;
+	                  break
+	                }
+	              }
+	            }
+
+	            const onError = (err) => this.onResponseError(controller, err);
+
+	            resolve({
+	              status,
+	              statusText,
+	              headersList,
+	              body: decoders.length
+	                ? pipeline(this.body, ...decoders, (err) => {
+	                  if (err) {
+	                    this.onResponseError(controller, err);
+	                  }
+	                }).on('error', onError)
+	                : this.body.on('error', onError)
+	            });
+	          },
+
+	          onResponseData (controller, chunk) {
+	            if (fetchParams.controller.dump) {
+	              return
+	            }
+
+	            // 1. If one or more bytes have been transmitted from response’s
+	            // message body, then:
+
+	            //  1. Let bytes be the transmitted bytes.
+	            const bytes = chunk;
+
+	            //  2. Let codings be the result of extracting header list values
+	            //  given `Content-Encoding` and response’s header list.
+	            //  See pullAlgorithm.
+
+	            //  3. Increase timingInfo’s encoded body size by bytes’s length.
+	            timingInfo.encodedBodySize += bytes.byteLength;
+
+	            //  4. See pullAlgorithm...
+
+	            if (this.body.push(bytes) === false) {
+	              controller.pause();
+	            }
+	          },
+
+	          onResponseEnd () {
+	            if (this.abort) {
+	              fetchParams.controller.off('terminated', this.abort);
+	            }
+
+	            fetchParams.controller.ended = true;
+
+	            this.body?.push(null);
+	          },
+
+	          onResponseError (_controller, error) {
+	            if (this.abort) {
+	              fetchParams.controller.off('terminated', this.abort);
+	            }
+
+	            if (
+	              request.mode === 'websocket' &&
+	              allowH2 !== false &&
+	              error?.code === 'UND_ERR_INFO' &&
+	              error?.message === 'HTTP/2: Extended CONNECT protocol not supported by server'
+	            ) {
+	              // The origin negotiated H2, but RFC 8441 websocket support is unavailable.
+	              // Retry the opening handshake on a fresh HTTP/1.1-only connection instead.
+	              resolve(dispatchWithProtocolPreference(body, false));
+	              return
+	            }
+
+	            this.body?.destroy(error);
+
+	            fetchParams.controller.terminate(error);
+
+	            reject(error);
+	          },
+
+	          onRequestUpgrade (controller, status, _headers, socket) {
+	            // We need to support 200 for websocket over h2 as per RFC-8441
+	            // Absence of session means H1
+	            if ((socket.session != null && status !== 200) || (socket.session == null && status !== 101)) {
+	              return false
+	            }
+
+	            const rawHeaders = controller?.rawHeaders ?? [];
+	            const headersList = new HeadersList();
+
+	            for (let i = 0; i < rawHeaders.length; i += 2) {
+	              const nameStr = bufferToLowerCasedHeaderName(rawHeaders[i]);
+	              const value = rawHeaders[i + 1];
+	              if (Array.isArray(value) && !Buffer.isBuffer(rawHeaders[i + 1])) {
+	                for (const val of value) {
+	                  headersList.append(nameStr, val.toString('latin1'), true);
+	                }
+	              } else {
+	                headersList.append(nameStr, value.toString('latin1'), true);
+	              }
+	            }
+
+	            resolve({
+	              status,
+	              statusText: STATUS_CODES[status],
+	              headersList,
+	              socket
+	            });
+
+	            return true
 	          }
-
-	          resolve({
-	            status,
-	            statusText: STATUS_CODES[status],
-	            headersList,
-	            socket
-	          });
-
-	          return true
-	        },
-
-	        onUpgrade (status, rawHeaders, socket) {
-	          // We need to support 200 for websocket over h2 as per RFC-8441
-	          // Absence of session means H1
-	          if ((socket.session != null && status !== 200) || (socket.session == null && status !== 101)) {
-	            return false
-	          }
-
-	          const headersList = new HeadersList();
-
-	          for (let i = 0; i < rawHeaders.length; i += 2) {
-	            headersList.append(bufferToLowerCasedHeaderName(rawHeaders[i]), rawHeaders[i + 1].toString('latin1'), true);
-	          }
-
-	          resolve({
-	            status,
-	            statusText: STATUS_CODES[status],
-	            headersList,
-	            socket
-	          });
-
-	          return true
 	        }
-	      }
-	    ))
+	      ))
+	    }
 	  }
 	}
 
@@ -30532,8 +30632,6 @@ function requireCache () {
 	const { Request, fromInnerRequest, getRequestState } = requireRequest();
 	const { fetching } = requireFetch();
 	const { urlIsHttpHttpsScheme, readAllBytes } = requireUtil$4();
-	const { createDeferredPromise } = requirePromise();
-
 	/**
 	 * @see https://w3c.github.io/ServiceWorker/#dfn-cache-batch-operation
 	 * @typedef {Object} CacheBatchOperation
@@ -30675,7 +30773,7 @@ function requireCache () {
 	      requestList.push(r);
 
 	      // 5.6
-	      const responsePromise = createDeferredPromise();
+	      const responsePromise = Promise.withResolvers();
 
 	      // 5.7
 	      fetchControllers.push(fetching({
@@ -30753,7 +30851,7 @@ function requireCache () {
 	    }
 
 	    // 7.5
-	    const cacheJobPromise = createDeferredPromise();
+	    const cacheJobPromise = Promise.withResolvers();
 
 	    // 7.6.1
 	    let errorData = null;
@@ -30847,7 +30945,7 @@ function requireCache () {
 	    const clonedResponse = cloneResponse(innerResponse);
 
 	    // 10.
-	    const bodyReadPromise = createDeferredPromise();
+	    const bodyReadPromise = Promise.withResolvers();
 
 	    // 11.
 	    if (innerResponse.body != null) {
@@ -30886,7 +30984,7 @@ function requireCache () {
 	    }
 
 	    // 19.1
-	    const cacheJobPromise = createDeferredPromise();
+	    const cacheJobPromise = Promise.withResolvers();
 
 	    // 19.2.1
 	    let errorData = null;
@@ -30949,7 +31047,7 @@ function requireCache () {
 
 	    operations.push(operation);
 
-	    const cacheJobPromise = createDeferredPromise();
+	    const cacheJobPromise = Promise.withResolvers();
 
 	    let errorData = null;
 	    let requestResponses;
@@ -31005,7 +31103,7 @@ function requireCache () {
 	    }
 
 	    // 4.
-	    const promise = createDeferredPromise();
+	    const promise = Promise.withResolvers();
 
 	    // 5.
 	    // 5.1
@@ -33705,7 +33803,7 @@ function requirePermessageDeflate () {
 	if (hasRequiredPermessageDeflate) return permessageDeflate;
 	hasRequiredPermessageDeflate = 1;
 
-	const { createInflateRaw, Z_DEFAULT_WINDOWBITS } = require$$3$1;
+	const { createInflateRaw, Z_DEFAULT_WINDOWBITS } = require$$0$6;
 	const { isValidClientWindowBits } = requireUtil$1();
 	const { MessageSizeExceededError } = requireErrors();
 
@@ -33713,40 +33811,35 @@ function requirePermessageDeflate () {
 	const kBuffer = Symbol('kBuffer');
 	const kLength = Symbol('kLength');
 
-	// Default maximum decompressed message size: 4 MB
-	const kDefaultMaxDecompressedSize = 4 * 1024 * 1024;
-
 	class PerMessageDeflate {
 	  /** @type {import('node:zlib').InflateRaw} */
 	  #inflate
 
 	  #options = {}
 
-	  /** @type {boolean} */
-	  #aborted = false
-
-	  /** @type {Function|null} */
-	  #currentCallback = null
+	  #maxPayloadSize = 0
 
 	  /**
 	   * @param {Map<string, string>} extensions
 	   */
-	  constructor (extensions) {
+	  constructor (extensions, options) {
 	    this.#options.serverNoContextTakeover = extensions.has('server_no_context_takeover');
 	    this.#options.serverMaxWindowBits = extensions.get('server_max_window_bits');
+
+	    this.#maxPayloadSize = options.maxPayloadSize;
 	  }
 
+	  /**
+	   * Decompress a compressed payload.
+	   * @param {Buffer} chunk Compressed data
+	   * @param {boolean} fin Final fragment flag
+	   * @param {Function} callback Callback function
+	   */
 	  decompress (chunk, fin, callback) {
 	    // An endpoint uses the following algorithm to decompress a message.
 	    // 1.  Append 4 octets of 0x00 0x00 0xff 0xff to the tail end of the
 	    //     payload of the message.
 	    // 2.  Decompress the resulting data using DEFLATE.
-
-	    if (this.#aborted) {
-	      callback(new MessageSizeExceededError());
-	      return
-	    }
-
 	    if (!this.#inflate) {
 	      let windowBits = Z_DEFAULT_WINDOWBITS;
 
@@ -33769,23 +33862,12 @@ function requirePermessageDeflate () {
 	      this.#inflate[kLength] = 0;
 
 	      this.#inflate.on('data', (data) => {
-	        if (this.#aborted) {
-	          return
-	        }
-
 	        this.#inflate[kLength] += data.length;
 
-	        if (this.#inflate[kLength] > kDefaultMaxDecompressedSize) {
-	          this.#aborted = true;
+	        if (this.#maxPayloadSize > 0 && this.#inflate[kLength] > this.#maxPayloadSize) {
+	          callback(new MessageSizeExceededError());
 	          this.#inflate.removeAllListeners();
-	          this.#inflate.destroy();
 	          this.#inflate = null;
-
-	          if (this.#currentCallback) {
-	            const cb = this.#currentCallback;
-	            this.#currentCallback = null;
-	            cb(new MessageSizeExceededError());
-	          }
 	          return
 	        }
 
@@ -33798,14 +33880,13 @@ function requirePermessageDeflate () {
 	      });
 	    }
 
-	    this.#currentCallback = callback;
 	    this.#inflate.write(chunk);
 	    if (fin) {
 	      this.#inflate.write(tail);
 	    }
 
 	    this.#inflate.flush(() => {
-	      if (this.#aborted || !this.#inflate) {
+	      if (!this.#inflate) {
 	        return
 	      }
 
@@ -33813,7 +33894,6 @@ function requirePermessageDeflate () {
 
 	      this.#inflate[kBuffer].length = 0;
 	      this.#inflate[kLength] = 0;
-	      this.#currentCallback = null;
 
 	      callback(null, full);
 	    });
@@ -33870,18 +33950,23 @@ function requireReceiver () {
 	  /** @type {import('./websocket').Handler} */
 	  #handler
 
+	  /** @type {number} */
+	  #maxPayloadSize
+
 	  /**
 	   * @param {import('./websocket').Handler} handler
 	   * @param {Map<string, string>|null} extensions
+	   * @param {{ maxPayloadSize?: number }} [options]
 	   */
-	  constructor (handler, extensions) {
+	  constructor (handler, extensions, options = {}) {
 	    super();
 
 	    this.#handler = handler;
 	    this.#extensions = extensions == null ? new Map() : extensions;
+	    this.#maxPayloadSize = options.maxPayloadSize ?? 0;
 
 	    if (this.#extensions.has('permessage-deflate')) {
-	      this.#extensions.set('permessage-deflate', new PerMessageDeflate(extensions));
+	      this.#extensions.set('permessage-deflate', new PerMessageDeflate(extensions, options));
 	    }
 	  }
 
@@ -33895,6 +33980,19 @@ function requireReceiver () {
 	    this.#loop = true;
 
 	    this.run(callback);
+	  }
+
+	  #validatePayloadLength () {
+	    if (
+	      this.#maxPayloadSize > 0 &&
+	      !isControlFrame(this.#info.opcode) &&
+	      this.#info.payloadLength > this.#maxPayloadSize
+	    ) {
+	      failWebsocketConnection(this.#handler, 1009, 'Payload size exceeds maximum allowed size');
+	      return false
+	    }
+
+	    return true
 	  }
 
 	  /**
@@ -33985,6 +34083,10 @@ function requireReceiver () {
 	        if (payloadLength <= 125) {
 	          this.#info.payloadLength = payloadLength;
 	          this.#state = parserStates.READ_DATA;
+
+	          if (!this.#validatePayloadLength()) {
+	            return
+	          }
 	        } else if (payloadLength === 126) {
 	          this.#state = parserStates.PAYLOADLENGTH_16;
 	        } else if (payloadLength === 127) {
@@ -34009,6 +34111,10 @@ function requireReceiver () {
 
 	        this.#info.payloadLength = buffer.readUInt16BE(0);
 	        this.#state = parserStates.READ_DATA;
+
+	        if (!this.#validatePayloadLength()) {
+	          return
+	        }
 	      } else if (this.#state === parserStates.PAYLOADLENGTH_64) {
 	        if (this.#byteOffset < 8) {
 	          return callback()
@@ -34031,6 +34137,10 @@ function requireReceiver () {
 
 	        this.#info.payloadLength = lower;
 	        this.#state = parserStates.READ_DATA;
+
+	        if (!this.#validatePayloadLength()) {
+	          return
+	        }
 	      } else if (this.#state === parserStates.READ_DATA) {
 	        if (this.#byteOffset < this.#info.payloadLength) {
 	          return callback()
@@ -34055,29 +34165,39 @@ function requireReceiver () {
 
 	            this.#state = parserStates.INFO;
 	          } else {
-	            this.#extensions.get('permessage-deflate').decompress(body, this.#info.fin, (error, data) => {
-	              if (error) {
-	                // Use 1009 (Message Too Big) for decompression size limit errors
-	                const code = error instanceof MessageSizeExceededError ? 1009 : 1007;
-	                failWebsocketConnection(this.#handler, code, error.message);
-	                return
-	              }
+	            this.#extensions.get('permessage-deflate').decompress(
+	              body,
+	              this.#info.fin,
+	              (error, data) => {
+	                if (error) {
+	                  const code = error instanceof MessageSizeExceededError ? 1009 : 1007;
+	                  failWebsocketConnection(this.#handler, code, error.message);
+	                  return
+	                }
 
-	              this.writeFragments(data);
+	                this.writeFragments(data);
 
-	              if (!this.#info.fin) {
-	                this.#state = parserStates.INFO;
+	                // Check cumulative fragment size
+	                if (this.#maxPayloadSize > 0 && this.#fragmentsBytes > this.#maxPayloadSize) {
+	                  failWebsocketConnection(this.#handler, 1009, new MessageSizeExceededError().message);
+	                  return
+	                }
+
+	                if (!this.#info.fin) {
+	                  this.#state = parserStates.INFO;
+	                  this.#loop = true;
+	                  this.run(callback);
+	                  return
+	                }
+
+	                websocketMessageReceived(this.#handler, this.#info.binaryType, this.consumeFragments());
+
 	                this.#loop = true;
+	                this.#state = parserStates.INFO;
 	                this.run(callback);
-	                return
-	              }
-
-	              websocketMessageReceived(this.#handler, this.#info.binaryType, this.consumeFragments());
-
-	              this.#loop = true;
-	              this.#state = parserStates.INFO;
-	              this.run(callback);
-	            });
+	              },
+	              this.#fragmentsBytes
+	            );
 
 	            this.#loop = false;
 	            break
@@ -34430,6 +34550,18 @@ function requireWebsocket () {
 	const { SendQueue } = requireSender();
 	const { WebsocketFrameSend } = requireFrame();
 	const { channels } = requireDiagnostics();
+
+	function getSocketAddress (socket) {
+	  if (typeof socket?.address === 'function') {
+	    return socket.address()
+	  }
+
+	  if (typeof socket?.session?.socket?.address === 'function') {
+	    return socket.session.socket.address()
+	  }
+
+	  return null
+	}
 
 	/**
 	 * @typedef {object} Handler
@@ -34862,7 +34994,12 @@ function requireWebsocket () {
 	    // once this happens, the connection is open
 	    this.#handler.socket = response.socket;
 
-	    const parser = new ByteParser(this.#handler, parsedExtensions);
+	    // Get maxPayloadSize from dispatcher options
+	    const maxPayloadSize = this.#handler.controller.dispatcher?.webSocketOptions?.maxPayloadSize;
+
+	    const parser = new ByteParser(this.#handler, parsedExtensions, {
+	      maxPayloadSize
+	    });
 	    parser.on('drain', () => this.#handler.onParserDrain());
 	    parser.on('error', (err) => this.#handler.onParserError(err));
 
@@ -34897,7 +35034,7 @@ function requireWebsocket () {
 	      // Convert headers to a plain object for the event
 	      const headers = response.headersList.entries;
 	      channels.open.publish({
-	        address: response.socket.address(),
+	        address: getSocketAddress(response.socket),
 	        protocol: this.#protocol,
 	        extensions: this.#extensions,
 	        websocket: this,
@@ -35265,7 +35402,6 @@ function requireWebsocketstream () {
 	if (hasRequiredWebsocketstream) return websocketstream;
 	hasRequiredWebsocketstream = 1;
 
-	const { createDeferredPromise } = requirePromise();
 	const { environmentSettingsObject } = requireUtil$4();
 	const { states, opcodes, sentCloseFrameState } = requireConstants();
 	const { webidl } = requireWebidl();
@@ -35286,11 +35422,11 @@ function requireWebsocketstream () {
 	  #url
 
 	  // Each WebSocketStream object has an associated opened promise , which is a promise.
-	  /** @type {import('../../../util/promise').DeferredPromise} */
+	  /** @type {ReturnType<typeof Promise.withResolvers>} */
 	  #openedPromise
 
 	  // Each WebSocketStream object has an associated closed promise , which is a promise.
-	  /** @type {import('../../../util/promise').DeferredPromise} */
+	  /** @type {ReturnType<typeof Promise.withResolvers>} */
 	  #closedPromise
 
 	  // Each WebSocketStream object has an associated readable stream , which is a ReadableStream .
@@ -35378,8 +35514,8 @@ function requireWebsocketstream () {
 	    this.#url = urlRecord.toString();
 
 	    // 6. Set this 's opened promise and closed promise to new promises.
-	    this.#openedPromise = createDeferredPromise();
-	    this.#closedPromise = createDeferredPromise();
+	    this.#openedPromise = Promise.withResolvers();
+	    this.#closedPromise = Promise.withResolvers();
 
 	    // 7. Apply backpressure to the WebSocket.
 	    // TODO
@@ -35467,7 +35603,7 @@ function requireWebsocketstream () {
 	    chunk = webidl.converters.WebSocketStreamWrite(chunk);
 
 	    // 1. Let promise be a new promise created in stream ’s relevant realm .
-	    const promise = createDeferredPromise();
+	    const promise = Promise.withResolvers();
 
 	    // 2. Let data be null.
 	    let data = null;
@@ -35548,12 +35684,6 @@ function requireWebsocketstream () {
 	    const readable = new ReadableStream({
 	      start: (controller) => {
 	        this.#readableStreamController = controller;
-	      },
-	      pull (controller) {
-	        let chunk;
-	        while (controller.desiredSize > 0 && (chunk = response.socket.read()) !== null) {
-	          controller.enqueue(chunk);
-	        }
 	      },
 	      cancel: (reason) => this.#cancel(reason)
 	    });
@@ -36731,6 +36861,7 @@ function requireUndici () {
 		const BalancedPool = requireBalancedPool();
 		const RoundRobinPool = requireRoundRobinPool();
 		const Agent = requireAgent();
+		const Dispatcher1Wrapper = requireDispatcher1Wrapper();
 		const ProxyAgent = requireProxyAgent();
 		const Socks5ProxyAgent = requireSocks5ProxyAgent();
 		const EnvHttpProxyAgent = requireEnvHttpProxyAgent();
@@ -36760,6 +36891,7 @@ function requireUndici () {
 		module.exports.BalancedPool = BalancedPool;
 		module.exports.RoundRobinPool = RoundRobinPool;
 		module.exports.Agent = Agent;
+		module.exports.Dispatcher1Wrapper = Dispatcher1Wrapper;
 		module.exports.ProxyAgent = ProxyAgent;
 		module.exports.Socks5ProxyAgent = Socks5ProxyAgent;
 		module.exports.EnvHttpProxyAgent = EnvHttpProxyAgent;
@@ -36828,14 +36960,14 @@ function requireUndici () {
 		      url = util.parseURL(url);
 		    }
 
-		    const { agent, dispatcher = getGlobalDispatcher() } = opts;
+		    const { agent, dispatcher = getGlobalDispatcher(), ...restOpts } = opts;
 
 		    if (agent) {
 		      throw new InvalidArgumentError('unsupported opts.agent. Did you mean opts.client?')
 		    }
 
 		    return fn.call(dispatcher, {
-		      ...opts,
+		      ...restOpts,
 		      origin: url.origin,
 		      path: url.search ? `${url.pathname}${url.search}` : url.pathname,
 		      method: opts.method || (opts.body ? 'PUT' : 'GET')
@@ -37253,7 +37385,7 @@ function replaceInstances(findData, content, prefix, suffix) {
 
 var Gt=(n,t,e)=>{let s=n instanceof RegExp?ce(n,e):n,i=t instanceof RegExp?ce(t,e):t,r=s!==null&&i!=null&&ss(s,i,e);return r&&{start:r[0],end:r[1],pre:e.slice(0,r[0]),body:e.slice(r[0]+s.length,r[1]),post:e.slice(r[1]+i.length)}},ce=(n,t)=>{let e=t.match(n);return e?e[0]:null},ss=(n,t,e)=>{let s,i,r,o,h,a=e.indexOf(n),l=e.indexOf(t,a+1),u=a;if(a>=0&&l>0){if(n===t)return [a,l];for(s=[],r=e.length;u>=0&&!h;){if(u===a)s.push(u),a=e.indexOf(n,u+1);else if(s.length===1){let c=s.pop();c!==void 0&&(h=[c,l]);}else i=s.pop(),i!==void 0&&i<r&&(r=i,o=l),l=e.indexOf(t,u+1);u=a<l&&a>=0?a:l;}s.length&&o!==void 0&&(h=[r,o]);}return h};var fe="\0SLASH"+Math.random()+"\0",ue="\0OPEN"+Math.random()+"\0",qt="\0CLOSE"+Math.random()+"\0",de="\0COMMA"+Math.random()+"\0",pe="\0PERIOD"+Math.random()+"\0",is=new RegExp(fe,"g"),rs=new RegExp(ue,"g"),ns=new RegExp(qt,"g"),os=new RegExp(de,"g"),hs=new RegExp(pe,"g"),as=/\\\\/g,ls=/\\{/g,cs=/\\}/g,fs=/\\,/g,us=/\\./g,ds=1e5;function Ht(n){return isNaN(n)?n.charCodeAt(0):parseInt(n,10)}function ps(n){return n.replace(as,fe).replace(ls,ue).replace(cs,qt).replace(fs,de).replace(us,pe)}function ms(n){return n.replace(is,"\\").replace(rs,"{").replace(ns,"}").replace(os,",").replace(hs,".")}function me(n){if(!n)return [""];let t=[],e=Gt("{","}",n);if(!e)return n.split(",");let{pre:s,body:i,post:r}=e,o=s.split(",");o[o.length-1]+="{"+i+"}";let h=me(r);return r.length&&(o[o.length-1]+=h.shift(),o.push.apply(o,h)),t.push.apply(t,o),t}function ge(n,t={}){if(!n)return [];let{max:e=ds}=t;return n.slice(0,2)==="{}"&&(n="\\{\\}"+n.slice(2)),ht(ps(n),e,true).map(ms)}function gs(n){return "{"+n+"}"}function ws(n){return /^-?0\d/.test(n)}function ys(n,t){return n<=t}function bs(n,t){return n>=t}function ht(n,t,e){let s=[],i=Gt("{","}",n);if(!i)return [n];let r=i.pre,o=i.post.length?ht(i.post,t,false):[""];if(/\$$/.test(i.pre))for(let h=0;h<o.length&&h<t;h++){let a=r+"{"+i.body+"}"+o[h];s.push(a);}else {let h=/^-?\d+\.\.-?\d+(?:\.\.-?\d+)?$/.test(i.body),a=/^[a-zA-Z]\.\.[a-zA-Z](?:\.\.-?\d+)?$/.test(i.body),l=h||a,u=i.body.indexOf(",")>=0;if(!l&&!u)return i.post.match(/,(?!,).*\}/)?(n=i.pre+"{"+i.body+qt+i.post,ht(n,t,true)):[n];let c;if(l)c=i.body.split(/\.\./);else if(c=me(i.body),c.length===1&&c[0]!==void 0&&(c=ht(c[0],t,false).map(gs),c.length===1))return o.map(f=>i.pre+c[0]+f);let d;if(l&&c[0]!==void 0&&c[1]!==void 0){let f=Ht(c[0]),m=Ht(c[1]),p=Math.max(c[0].length,c[1].length),w=c.length===3&&c[2]!==void 0?Math.abs(Ht(c[2])):1,g=ys;m<f&&(w*=-1,g=bs);let E=c.some(ws);d=[];for(let y=f;g(y,m);y+=w){let b;if(a)b=String.fromCharCode(y),b==="\\"&&(b="");else if(b=String(y),E){let z=p-b.length;if(z>0){let $=new Array(z+1).join("0");y<0?b="-"+$+b.slice(1):b=$+b;}}d.push(b);}}else {d=[];for(let f=0;f<c.length;f++)d.push.apply(d,ht(c[f],t,false));}for(let f=0;f<d.length;f++)for(let m=0;m<o.length&&s.length<t;m++){let p=r+d[f]+o[m];(!e||l||p)&&s.push(p);}}return s}var at=n=>{if(typeof n!="string")throw new TypeError("invalid pattern");if(n.length>65536)throw new TypeError("pattern is too long")};var Ss={"[:alnum:]":["\\p{L}\\p{Nl}\\p{Nd}",true],"[:alpha:]":["\\p{L}\\p{Nl}",true],"[:ascii:]":["\\x00-\\x7f",false],"[:blank:]":["\\p{Zs}\\t",true],"[:cntrl:]":["\\p{Cc}",true],"[:digit:]":["\\p{Nd}",true],"[:graph:]":["\\p{Z}\\p{C}",true,true],"[:lower:]":["\\p{Ll}",true],"[:print:]":["\\p{C}",true],"[:punct:]":["\\p{P}",true],"[:space:]":["\\p{Z}\\t\\r\\n\\v\\f",true],"[:upper:]":["\\p{Lu}",true],"[:word:]":["\\p{L}\\p{Nl}\\p{Nd}\\p{Pc}",true],"[:xdigit:]":["A-Fa-f0-9",false]},lt=n=>n.replace(/[[\]\\-]/g,"\\$&"),Es=n=>n.replace(/[-[\]{}()*+?.,\\^$|#\s]/g,"\\$&"),we=n=>n.join(""),ye=(n,t)=>{let e=t;if(n.charAt(e)!=="[")throw new Error("not in a brace expression");let s=[],i=[],r=e+1,o=false,h=false,a=false,l=false,u=e,c="";t:for(;r<n.length;){let p=n.charAt(r);if((p==="!"||p==="^")&&r===e+1){l=true,r++;continue}if(p==="]"&&o&&!a){u=r+1;break}if(o=true,p==="\\"&&!a){a=true,r++;continue}if(p==="["&&!a){for(let[w,[g,S,E]]of Object.entries(Ss))if(n.startsWith(w,r)){if(c)return ["$.",false,n.length-e,true];r+=w.length,E?i.push(g):s.push(g),h=h||S;continue t}}if(a=false,c){p>c?s.push(lt(c)+"-"+lt(p)):p===c&&s.push(lt(p)),c="",r++;continue}if(n.startsWith("-]",r+1)){s.push(lt(p+"-")),r+=2;continue}if(n.startsWith("-",r+1)){c=p,r+=2;continue}s.push(lt(p)),r++;}if(u<r)return ["",false,0,false];if(!s.length&&!i.length)return ["$.",false,n.length-e,true];if(i.length===0&&s.length===1&&/^\\?.$/.test(s[0])&&!l){let p=s[0].length===2?s[0].slice(-1):s[0];return [Es(p),false,u-e,false]}let d="["+(l?"^":"")+we(s)+"]",f="["+(l?"":"^")+we(i)+"]";return [s.length&&i.length?"("+d+"|"+f+")":s.length?d:f,h,u-e,true]};var W=(n,{windowsPathsNoEscape:t=false,magicalBraces:e=true}={})=>e?t?n.replace(/\[([^\/\\])\]/g,"$1"):n.replace(/((?!\\).|^)\[([^\/\\])\]/g,"$1$2").replace(/\\([^\/])/g,"$1"):t?n.replace(/\[([^\/\\{}])\]/g,"$1"):n.replace(/((?!\\).|^)\[([^\/\\{}])\]/g,"$1$2").replace(/\\([^\/{}])/g,"$1");var xs=new Set(["!","?","+","*","@"]),be=n=>xs.has(n),vs="(?!(?:^|/)\\.\\.?(?:$|/))",Ct="(?!\\.)",Cs=new Set(["[","."]),Ts=new Set(["..","."]),As=new Set("().*{}+?[]^$\\!"),ks=n=>n.replace(/[-[\]{}()*+?.,\\^$|#\s]/g,"\\$&"),Kt="[^/]",Se=Kt+"*?",Ee=Kt+"+?",Q=class n{type;#t;#s;#n=false;#r=[];#o;#S;#w;#c=false;#h;#u;#f=false;constructor(t,e,s={}){this.type=t,t&&(this.#s=true),this.#o=e,this.#t=this.#o?this.#o.#t:this,this.#h=this.#t===this?s:this.#t.#h,this.#w=this.#t===this?[]:this.#t.#w,t==="!"&&!this.#t.#c&&this.#w.push(this),this.#S=this.#o?this.#o.#r.length:0;}get hasMagic(){if(this.#s!==void 0)return this.#s;for(let t of this.#r)if(typeof t!="string"&&(t.type||t.hasMagic))return this.#s=true;return this.#s}toString(){return this.#u!==void 0?this.#u:this.type?this.#u=this.type+"("+this.#r.map(t=>String(t)).join("|")+")":this.#u=this.#r.map(t=>String(t)).join("")}#a(){if(this!==this.#t)throw new Error("should only call on root");if(this.#c)return this;this.toString(),this.#c=true;let t;for(;t=this.#w.pop();){if(t.type!=="!")continue;let e=t,s=e.#o;for(;s;){for(let i=e.#S+1;!s.type&&i<s.#r.length;i++)for(let r of t.#r){if(typeof r=="string")throw new Error("string part in extglob AST??");r.copyIn(s.#r[i]);}e=s,s=e.#o;}}return this}push(...t){for(let e of t)if(e!==""){if(typeof e!="string"&&!(e instanceof n&&e.#o===this))throw new Error("invalid part: "+e);this.#r.push(e);}}toJSON(){let t=this.type===null?this.#r.slice().map(e=>typeof e=="string"?e:e.toJSON()):[this.type,...this.#r.map(e=>e.toJSON())];return this.isStart()&&!this.type&&t.unshift([]),this.isEnd()&&(this===this.#t||this.#t.#c&&this.#o?.type==="!")&&t.push({}),t}isStart(){if(this.#t===this)return  true;if(!this.#o?.isStart())return  false;if(this.#S===0)return  true;let t=this.#o;for(let e=0;e<this.#S;e++){let s=t.#r[e];if(!(s instanceof n&&s.type==="!"))return  false}return  true}isEnd(){if(this.#t===this||this.#o?.type==="!")return  true;if(!this.#o?.isEnd())return  false;if(!this.type)return this.#o?.isEnd();let t=this.#o?this.#o.#r.length:0;return this.#S===t-1}copyIn(t){typeof t=="string"?this.push(t):this.push(t.clone(this));}clone(t){let e=new n(this.type,t);for(let s of this.#r)e.copyIn(s);return e}static#i(t,e,s,i){let r=false,o=false,h=-1,a=false;if(e.type===null){let f=s,m="";for(;f<t.length;){let p=t.charAt(f++);if(r||p==="\\"){r=!r,m+=p;continue}if(o){f===h+1?(p==="^"||p==="!")&&(a=true):p==="]"&&!(f===h+2&&a)&&(o=false),m+=p;continue}else if(p==="["){o=true,h=f,a=false,m+=p;continue}if(!i.noext&&be(p)&&t.charAt(f)==="("){e.push(m),m="";let w=new n(p,e);f=n.#i(t,w,f,i),e.push(w);continue}m+=p;}return e.push(m),f}let l=s+1,u=new n(null,e),c=[],d="";for(;l<t.length;){let f=t.charAt(l++);if(r||f==="\\"){r=!r,d+=f;continue}if(o){l===h+1?(f==="^"||f==="!")&&(a=true):f==="]"&&!(l===h+2&&a)&&(o=false),d+=f;continue}else if(f==="["){o=true,h=l,a=false,d+=f;continue}if(be(f)&&t.charAt(l)==="("){u.push(d),d="";let m=new n(f,u);u.push(m),l=n.#i(t,m,l,i);continue}if(f==="|"){u.push(d),d="",c.push(u),u=new n(null,e);continue}if(f===")")return d===""&&e.#r.length===0&&(e.#f=true),u.push(d),d="",e.push(...c,u),l;d+=f;}return e.type=null,e.#s=void 0,e.#r=[t.substring(s-1)],l}static fromGlob(t,e={}){let s=new n(null,void 0,e);return n.#i(t,s,0,e),s}toMMPattern(){if(this!==this.#t)return this.#t.toMMPattern();let t=this.toString(),[e,s,i,r]=this.toRegExpSource();if(!(i||this.#s||this.#h.nocase&&!this.#h.nocaseMagicOnly&&t.toUpperCase()!==t.toLowerCase()))return s;let h=(this.#h.nocase?"i":"")+(r?"u":"");return Object.assign(new RegExp(`^${e}$`,h),{_src:e,_glob:t})}get options(){return this.#h}toRegExpSource(t){let e=t??!!this.#h.dot;if(this.#t===this&&this.#a(),!this.type){let a=this.isStart()&&this.isEnd()&&!this.#r.some(f=>typeof f!="string"),l=this.#r.map(f=>{let[m,p,w,g]=typeof f=="string"?n.#E(f,this.#s,a):f.toRegExpSource(t);return this.#s=this.#s||w,this.#n=this.#n||g,m}).join(""),u="";if(this.isStart()&&typeof this.#r[0]=="string"&&!(this.#r.length===1&&Ts.has(this.#r[0]))){let m=Cs,p=e&&m.has(l.charAt(0))||l.startsWith("\\.")&&m.has(l.charAt(2))||l.startsWith("\\.\\.")&&m.has(l.charAt(4)),w=!e&&!t&&m.has(l.charAt(0));u=p?vs:w?Ct:"";}let c="";return this.isEnd()&&this.#t.#c&&this.#o?.type==="!"&&(c="(?:$|\\/)"),[u+l+c,W(l),this.#s=!!this.#s,this.#n]}let s=this.type==="*"||this.type==="+",i=this.type==="!"?"(?:(?!(?:":"(?:",r=this.#d(e);if(this.isStart()&&this.isEnd()&&!r&&this.type!=="!"){let a=this.toString();return this.#r=[a],this.type=null,this.#s=void 0,[a,W(this.toString()),false,false]}let o=!s||t||e||!Ct?"":this.#d(true);o===r&&(o=""),o&&(r=`(?:${r})(?:${o})*?`);let h="";if(this.type==="!"&&this.#f)h=(this.isStart()&&!e?Ct:"")+Ee;else {let a=this.type==="!"?"))"+(this.isStart()&&!e&&!t?Ct:"")+Se+")":this.type==="@"?")":this.type==="?"?")?":this.type==="+"&&o?")":this.type==="*"&&o?")?":`)${this.type}`;h=i+r+a;}return [h,W(r),this.#s=!!this.#s,this.#n]}#d(t){return this.#r.map(e=>{if(typeof e=="string")throw new Error("string type in extglob ast??");let[s,i,r,o]=e.toRegExpSource(t);return this.#n=this.#n||o,s}).filter(e=>!(this.isStart()&&this.isEnd())||!!e).join("|")}static#E(t,e,s=false){let i=false,r="",o=false,h=false;for(let a=0;a<t.length;a++){let l=t.charAt(a);if(i){i=false,r+=(As.has(l)?"\\":"")+l;continue}if(l==="*"){if(h)continue;h=true,r+=s&&/^[*]+$/.test(t)?Ee:Se,e=true;continue}else h=false;if(l==="\\"){a===t.length-1?r+="\\\\":i=true;continue}if(l==="["){let[u,c,d,f]=ye(t,a);if(d){r+=u,o=o||c,a+=d-1,e=e||f;continue}}if(l==="?"){r+=Kt,e=true;continue}r+=ks(l);}return [r,W(t),!!e,o]}};var tt=(n,{windowsPathsNoEscape:t=false,magicalBraces:e=false}={})=>e?t?n.replace(/[?*()[\]{}]/g,"[$&]"):n.replace(/[?*()[\]\\{}]/g,"\\$&"):t?n.replace(/[?*()[\]]/g,"[$&]"):n.replace(/[?*()[\]\\]/g,"\\$&");var O=(n,t,e={})=>(at(t),!e.nocomment&&t.charAt(0)==="#"?false:new D(t,e).match(n)),Rs=/^\*+([^+@!?\*\[\(]*)$/,Os=n=>t=>!t.startsWith(".")&&t.endsWith(n),Fs=n=>t=>t.endsWith(n),Ds=n=>(n=n.toLowerCase(),t=>!t.startsWith(".")&&t.toLowerCase().endsWith(n)),Ms=n=>(n=n.toLowerCase(),t=>t.toLowerCase().endsWith(n)),Ns=/^\*+\.\*+$/,_s=n=>!n.startsWith(".")&&n.includes("."),Ls=n=>n!=="."&&n!==".."&&n.includes("."),Ws=/^\.\*+$/,Ps=n=>n!=="."&&n!==".."&&n.startsWith("."),js=/^\*+$/,Is=n=>n.length!==0&&!n.startsWith("."),zs=n=>n.length!==0&&n!=="."&&n!=="..",Bs=/^\?+([^+@!?\*\[\(]*)?$/,Us=([n,t=""])=>{let e=Ce([n]);return t?(t=t.toLowerCase(),s=>e(s)&&s.toLowerCase().endsWith(t)):e},$s=([n,t=""])=>{let e=Te([n]);return t?(t=t.toLowerCase(),s=>e(s)&&s.toLowerCase().endsWith(t)):e},Gs=([n,t=""])=>{let e=Te([n]);return t?s=>e(s)&&s.endsWith(t):e},Hs=([n,t=""])=>{let e=Ce([n]);return t?s=>e(s)&&s.endsWith(t):e},Ce=([n])=>{let t=n.length;return e=>e.length===t&&!e.startsWith(".")},Te=([n])=>{let t=n.length;return e=>e.length===t&&e!=="."&&e!==".."},Ae=typeof process=="object"&&process?typeof process.env=="object"&&process.env&&process.env.__MINIMATCH_TESTING_PLATFORM__||process.platform:"posix",xe={win32:{sep:"\\"},posix:{sep:"/"}},qs=Ae==="win32"?xe.win32.sep:xe.posix.sep;O.sep=qs;var A=Symbol("globstar **");O.GLOBSTAR=A;var Ks="[^/]",Vs=Ks+"*?",Ys="(?:(?!(?:\\/|^)(?:\\.{1,2})($|\\/)).)*?",Xs="(?:(?!(?:\\/|^)\\.).)*?",Js=(n,t={})=>e=>O(e,n,t);O.filter=Js;var N=(n,t={})=>Object.assign({},n,t),Zs=n=>{if(!n||typeof n!="object"||!Object.keys(n).length)return O;let t=O;return Object.assign((s,i,r={})=>t(s,i,N(n,r)),{Minimatch:class extends t.Minimatch{constructor(i,r={}){super(i,N(n,r));}static defaults(i){return t.defaults(N(n,i)).Minimatch}},AST:class extends t.AST{constructor(i,r,o={}){super(i,r,N(n,o));}static fromGlob(i,r={}){return t.AST.fromGlob(i,N(n,r))}},unescape:(s,i={})=>t.unescape(s,N(n,i)),escape:(s,i={})=>t.escape(s,N(n,i)),filter:(s,i={})=>t.filter(s,N(n,i)),defaults:s=>t.defaults(N(n,s)),makeRe:(s,i={})=>t.makeRe(s,N(n,i)),braceExpand:(s,i={})=>t.braceExpand(s,N(n,i)),match:(s,i,r={})=>t.match(s,i,N(n,r)),sep:t.sep,GLOBSTAR:A})};O.defaults=Zs;var ke=(n,t={})=>(at(n),t.nobrace||!/\{(?:(?!\{).)*\}/.test(n)?[n]:ge(n,{max:t.braceExpandMax}));O.braceExpand=ke;var Qs=(n,t={})=>new D(n,t).makeRe();O.makeRe=Qs;var ti=(n,t,e={})=>{let s=new D(t,e);return n=n.filter(i=>s.match(i)),s.options.nonull&&!n.length&&n.push(t),n};O.match=ti;var ve=/[?*]|[+@!]\(.*?\)|\[|\]/,ei=n=>n.replace(/[-[\]{}()*+?.,\\^$|#\s]/g,"\\$&"),D=class{options;set;pattern;windowsPathsNoEscape;nonegate;negate;comment;empty;preserveMultipleSlashes;partial;globSet;globParts;nocase;isWindows;platform;windowsNoMagicRoot;regexp;constructor(t,e={}){at(t),e=e||{},this.options=e,this.pattern=t,this.platform=e.platform||Ae,this.isWindows=this.platform==="win32";let s="allowWindowsEscape";this.windowsPathsNoEscape=!!e.windowsPathsNoEscape||e[s]===false,this.windowsPathsNoEscape&&(this.pattern=this.pattern.replace(/\\/g,"/")),this.preserveMultipleSlashes=!!e.preserveMultipleSlashes,this.regexp=null,this.negate=false,this.nonegate=!!e.nonegate,this.comment=false,this.empty=false,this.partial=!!e.partial,this.nocase=!!this.options.nocase,this.windowsNoMagicRoot=e.windowsNoMagicRoot!==void 0?e.windowsNoMagicRoot:!!(this.isWindows&&this.nocase),this.globSet=[],this.globParts=[],this.set=[],this.make();}hasMagic(){if(this.options.magicalBraces&&this.set.length>1)return  true;for(let t of this.set)for(let e of t)if(typeof e!="string")return  true;return  false}debug(...t){}make(){let t=this.pattern,e=this.options;if(!e.nocomment&&t.charAt(0)==="#"){this.comment=true;return}if(!t){this.empty=true;return}this.parseNegate(),this.globSet=[...new Set(this.braceExpand())],e.debug&&(this.debug=(...r)=>console.error(...r)),this.debug(this.pattern,this.globSet);let s=this.globSet.map(r=>this.slashSplit(r));this.globParts=this.preprocess(s),this.debug(this.pattern,this.globParts);let i=this.globParts.map((r,o,h)=>{if(this.isWindows&&this.windowsNoMagicRoot){let a=r[0]===""&&r[1]===""&&(r[2]==="?"||!ve.test(r[2]))&&!ve.test(r[3]),l=/^[a-z]:/i.test(r[0]);if(a)return [...r.slice(0,4),...r.slice(4).map(u=>this.parse(u))];if(l)return [r[0],...r.slice(1).map(u=>this.parse(u))]}return r.map(a=>this.parse(a))});if(this.debug(this.pattern,i),this.set=i.filter(r=>r.indexOf(false)===-1),this.isWindows)for(let r=0;r<this.set.length;r++){let o=this.set[r];o[0]===""&&o[1]===""&&this.globParts[r][2]==="?"&&typeof o[3]=="string"&&/^[a-z]:$/i.test(o[3])&&(o[2]="?");}this.debug(this.pattern,this.set);}preprocess(t){if(this.options.noglobstar)for(let s=0;s<t.length;s++)for(let i=0;i<t[s].length;i++)t[s][i]==="**"&&(t[s][i]="*");let{optimizationLevel:e=1}=this.options;return e>=2?(t=this.firstPhasePreProcess(t),t=this.secondPhasePreProcess(t)):e>=1?t=this.levelOneOptimize(t):t=this.adjascentGlobstarOptimize(t),t}adjascentGlobstarOptimize(t){return t.map(e=>{let s=-1;for(;(s=e.indexOf("**",s+1))!==-1;){let i=s;for(;e[i+1]==="**";)i++;i!==s&&e.splice(s,i-s);}return e})}levelOneOptimize(t){return t.map(e=>(e=e.reduce((s,i)=>{let r=s[s.length-1];return i==="**"&&r==="**"?s:i===".."&&r&&r!==".."&&r!=="."&&r!=="**"?(s.pop(),s):(s.push(i),s)},[]),e.length===0?[""]:e))}levelTwoFileOptimize(t){Array.isArray(t)||(t=this.slashSplit(t));let e=false;do{if(e=false,!this.preserveMultipleSlashes){for(let i=1;i<t.length-1;i++){let r=t[i];i===1&&r===""&&t[0]===""||(r==="."||r==="")&&(e=true,t.splice(i,1),i--);}t[0]==="."&&t.length===2&&(t[1]==="."||t[1]==="")&&(e=true,t.pop());}let s=0;for(;(s=t.indexOf("..",s+1))!==-1;){let i=t[s-1];i&&i!=="."&&i!==".."&&i!=="**"&&(e=true,t.splice(s-1,2),s-=2);}}while(e);return t.length===0?[""]:t}firstPhasePreProcess(t){let e=false;do{e=false;for(let s of t){let i=-1;for(;(i=s.indexOf("**",i+1))!==-1;){let o=i;for(;s[o+1]==="**";)o++;o>i&&s.splice(i+1,o-i);let h=s[i+1],a=s[i+2],l=s[i+3];if(h!==".."||!a||a==="."||a===".."||!l||l==="."||l==="..")continue;e=true,s.splice(i,1);let u=s.slice(0);u[i]="**",t.push(u),i--;}if(!this.preserveMultipleSlashes){for(let o=1;o<s.length-1;o++){let h=s[o];o===1&&h===""&&s[0]===""||(h==="."||h==="")&&(e=true,s.splice(o,1),o--);}s[0]==="."&&s.length===2&&(s[1]==="."||s[1]==="")&&(e=true,s.pop());}let r=0;for(;(r=s.indexOf("..",r+1))!==-1;){let o=s[r-1];if(o&&o!=="."&&o!==".."&&o!=="**"){e=true;let a=r===1&&s[r+1]==="**"?["."]:[];s.splice(r-1,2,...a),s.length===0&&s.push(""),r-=2;}}}}while(e);return t}secondPhasePreProcess(t){for(let e=0;e<t.length-1;e++)for(let s=e+1;s<t.length;s++){let i=this.partsMatch(t[e],t[s],!this.preserveMultipleSlashes);if(i){t[e]=[],t[s]=i;break}}return t.filter(e=>e.length)}partsMatch(t,e,s=false){let i=0,r=0,o=[],h="";for(;i<t.length&&r<e.length;)if(t[i]===e[r])o.push(h==="b"?e[r]:t[i]),i++,r++;else if(s&&t[i]==="**"&&e[r]===t[i+1])o.push(t[i]),i++;else if(s&&e[r]==="**"&&t[i]===e[r+1])o.push(e[r]),r++;else if(t[i]==="*"&&e[r]&&(this.options.dot||!e[r].startsWith("."))&&e[r]!=="**"){if(h==="b")return  false;h="a",o.push(t[i]),i++,r++;}else if(e[r]==="*"&&t[i]&&(this.options.dot||!t[i].startsWith("."))&&t[i]!=="**"){if(h==="a")return  false;h="b",o.push(e[r]),i++,r++;}else return  false;return t.length===e.length&&o}parseNegate(){if(this.nonegate)return;let t=this.pattern,e=false,s=0;for(let i=0;i<t.length&&t.charAt(i)==="!";i++)e=!e,s++;s&&(this.pattern=t.slice(s)),this.negate=e;}matchOne(t,e,s=false){let i=this.options;if(this.isWindows){let p=typeof t[0]=="string"&&/^[a-z]:$/i.test(t[0]),w=!p&&t[0]===""&&t[1]===""&&t[2]==="?"&&/^[a-z]:$/i.test(t[3]),g=typeof e[0]=="string"&&/^[a-z]:$/i.test(e[0]),S=!g&&e[0]===""&&e[1]===""&&e[2]==="?"&&typeof e[3]=="string"&&/^[a-z]:$/i.test(e[3]),E=w?3:p?0:void 0,y=S?3:g?0:void 0;if(typeof E=="number"&&typeof y=="number"){let[b,z]=[t[E],e[y]];b.toLowerCase()===z.toLowerCase()&&(e[y]=b,y>E?e=e.slice(y):E>y&&(t=t.slice(E)));}}let{optimizationLevel:r=1}=this.options;r>=2&&(t=this.levelTwoFileOptimize(t)),this.debug("matchOne",this,{file:t,pattern:e}),this.debug("matchOne",t.length,e.length);for(var o=0,h=0,a=t.length,l=e.length;o<a&&h<l;o++,h++){this.debug("matchOne loop");var u=e[h],c=t[o];if(this.debug(e,u,c),u===false)return  false;if(u===A){this.debug("GLOBSTAR",[e,u,c]);var d=o,f=h+1;if(f===l){for(this.debug("** at the end");o<a;o++)if(t[o]==="."||t[o]===".."||!i.dot&&t[o].charAt(0)===".")return  false;return  true}for(;d<a;){var m=t[d];if(this.debug(`
 globstar while`,t,d,e,f,m),this.matchOne(t.slice(d),e.slice(f),s))return this.debug("globstar found match!",d,a,m),true;if(m==="."||m===".."||!i.dot&&m.charAt(0)==="."){this.debug("dot detected!",t,d,e,f);break}this.debug("globstar swallow a segment, and continue"),d++;}return !!(s&&(this.debug(`
->>> no match, partial?`,t,d,e,f),d===a))}let p;if(typeof u=="string"?(p=c===u,this.debug("string match",u,c,p)):(p=u.test(c),this.debug("pattern match",u,c,p)),!p)return  false}if(o===a&&h===l)return  true;if(o===a)return s;if(h===l)return o===a-1&&t[o]==="";throw new Error("wtf?")}braceExpand(){return ke(this.pattern,this.options)}parse(t){at(t);let e=this.options;if(t==="**")return A;if(t==="")return "";let s,i=null;(s=t.match(js))?i=e.dot?zs:Is:(s=t.match(Rs))?i=(e.nocase?e.dot?Ms:Ds:e.dot?Fs:Os)(s[1]):(s=t.match(Bs))?i=(e.nocase?e.dot?$s:Us:e.dot?Gs:Hs)(s):(s=t.match(Ns))?i=e.dot?Ls:_s:(s=t.match(Ws))&&(i=Ps);let r=Q.fromGlob(t,this.options).toMMPattern();return i&&typeof r=="object"&&Reflect.defineProperty(r,"test",{value:i}),r}makeRe(){if(this.regexp||this.regexp===false)return this.regexp;let t=this.set;if(!t.length)return this.regexp=false,this.regexp;let e=this.options,s=e.noglobstar?Vs:e.dot?Ys:Xs,i=new Set(e.nocase?["i"]:[]),r=t.map(a=>{let l=a.map(c=>{if(c instanceof RegExp)for(let d of c.flags.split(""))i.add(d);return typeof c=="string"?ei(c):c===A?A:c._src});l.forEach((c,d)=>{let f=l[d+1],m=l[d-1];c!==A||m===A||(m===void 0?f!==void 0&&f!==A?l[d+1]="(?:\\/|"+s+"\\/)?"+f:l[d]=s:f===void 0?l[d-1]=m+"(?:\\/|\\/"+s+")?":f!==A&&(l[d-1]=m+"(?:\\/|\\/"+s+"\\/)"+f,l[d+1]=A));});let u=l.filter(c=>c!==A);if(this.partial&&u.length>=1){let c=[];for(let d=1;d<=u.length;d++)c.push(u.slice(0,d).join("/"));return "(?:"+c.join("|")+")"}return u.join("/")}).join("|"),[o,h]=t.length>1?["(?:",")"]:["",""];r="^"+o+r+h+"$",this.partial&&(r="^(?:\\/|"+o+r.slice(1,-1)+h+")$"),this.negate&&(r="^(?!"+r+").+$");try{this.regexp=new RegExp(r,[...i].join(""));}catch{this.regexp=false;}return this.regexp}slashSplit(t){return this.preserveMultipleSlashes?t.split("/"):this.isWindows&&/^\/\/[^\/]+/.test(t)?["",...t.split(/\/+/)]:t.split(/\/+/)}match(t,e=this.partial){if(this.debug("match",t,this.pattern),this.comment)return  false;if(this.empty)return t==="";if(t==="/"&&e)return  true;let s=this.options;this.isWindows&&(t=t.split("\\").join("/"));let i=this.slashSplit(t);this.debug(this.pattern,"split",i);let r=this.set;this.debug(this.pattern,"set",r);let o=i[i.length-1];if(!o)for(let h=i.length-2;!o&&h>=0;h--)o=i[h];for(let h=0;h<r.length;h++){let a=r[h],l=i;if(s.matchBase&&a.length===1&&(l=[o]),this.matchOne(l,a,e))return s.flipNegate?true:!this.negate}return s.flipNegate?false:this.negate}static defaults(t){return O.defaults(t).Minimatch}};O.AST=Q;O.Minimatch=D;O.escape=tt;O.unescape=W;var si=typeof performance=="object"&&performance&&typeof performance.now=="function"?performance:Date,Oe=new Set,Vt=typeof process=="object"&&process?process:{},Fe=(n,t,e,s)=>{typeof Vt.emitWarning=="function"?Vt.emitWarning(n,t,e,s):console.error(`[${e}] ${t}: ${n}`);},At=globalThis.AbortController,Re=globalThis.AbortSignal;if(typeof At>"u"){Re=class{onabort;_onabort=[];reason;aborted=false;addEventListener(e,s){this._onabort.push(s);}},At=class{constructor(){t();}signal=new Re;abort(e){if(!this.signal.aborted){this.signal.reason=e,this.signal.aborted=true;for(let s of this.signal._onabort)s(e);this.signal.onabort?.(e);}}};let n=Vt.env?.LRU_CACHE_IGNORE_AC_WARNING!=="1",t=()=>{n&&(n=false,Fe("AbortController is not defined. If using lru-cache in node 14, load an AbortController polyfill from the `node-abort-controller` package. A minimal polyfill is provided for use by LRUCache.fetch(), but it should not be relied upon in other contexts (eg, passing it to other APIs that use AbortController/AbortSignal might have undesirable effects). You may disable this with LRU_CACHE_IGNORE_AC_WARNING=1 in the env.","NO_ABORT_CONTROLLER","ENOTSUP",t));};}var ii=n=>!Oe.has(n);var q=n=>n&&n===Math.floor(n)&&n>0&&isFinite(n),De=n=>q(n)?n<=Math.pow(2,8)?Uint8Array:n<=Math.pow(2,16)?Uint16Array:n<=Math.pow(2,32)?Uint32Array:n<=Number.MAX_SAFE_INTEGER?Tt:null:null,Tt=class extends Array{constructor(n){super(n),this.fill(0);}},ri=class ct{heap;length;static#t=false;static create(t){let e=De(t);if(!e)return [];ct.#t=true;let s=new ct(t,e);return ct.#t=false,s}constructor(t,e){if(!ct.#t)throw new TypeError("instantiate Stack using Stack.create(n)");this.heap=new e(t),this.length=0;}push(t){this.heap[this.length++]=t;}pop(){return this.heap[--this.length]}},ft=class Me{#t;#s;#n;#r;#o;#S;#w;#c;get perf(){return this.#c}ttl;ttlResolution;ttlAutopurge;updateAgeOnGet;updateAgeOnHas;allowStale;noDisposeOnSet;noUpdateTTL;maxEntrySize;sizeCalculation;noDeleteOnFetchRejection;noDeleteOnStaleGet;allowStaleOnFetchAbort;allowStaleOnFetchRejection;ignoreFetchAbort;#h;#u;#f;#a;#i;#d;#E;#b;#p;#R;#m;#C;#T;#g;#y;#x;#A;#e;#_;static unsafeExposeInternals(t){return {starts:t.#T,ttls:t.#g,autopurgeTimers:t.#y,sizes:t.#C,keyMap:t.#f,keyList:t.#a,valList:t.#i,next:t.#d,prev:t.#E,get head(){return t.#b},get tail(){return t.#p},free:t.#R,isBackgroundFetch:e=>t.#l(e),backgroundFetch:(e,s,i,r)=>t.#U(e,s,i,r),moveToTail:e=>t.#W(e),indexes:e=>t.#F(e),rindexes:e=>t.#D(e),isStale:e=>t.#v(e)}}get max(){return this.#t}get maxSize(){return this.#s}get calculatedSize(){return this.#u}get size(){return this.#h}get fetchMethod(){return this.#S}get memoMethod(){return this.#w}get dispose(){return this.#n}get onInsert(){return this.#r}get disposeAfter(){return this.#o}constructor(t){let{max:e=0,ttl:s,ttlResolution:i=1,ttlAutopurge:r,updateAgeOnGet:o,updateAgeOnHas:h,allowStale:a,dispose:l,onInsert:u,disposeAfter:c,noDisposeOnSet:d,noUpdateTTL:f,maxSize:m=0,maxEntrySize:p=0,sizeCalculation:w,fetchMethod:g,memoMethod:S,noDeleteOnFetchRejection:E,noDeleteOnStaleGet:y,allowStaleOnFetchRejection:b,allowStaleOnFetchAbort:z,ignoreFetchAbort:$,perf:J}=t;if(J!==void 0&&typeof J?.now!="function")throw new TypeError("perf option must have a now() method if specified");if(this.#c=J??si,e!==0&&!q(e))throw new TypeError("max option must be a nonnegative integer");let Z=e?De(e):Array;if(!Z)throw new Error("invalid max value: "+e);if(this.#t=e,this.#s=m,this.maxEntrySize=p||this.#s,this.sizeCalculation=w,this.sizeCalculation){if(!this.#s&&!this.maxEntrySize)throw new TypeError("cannot set sizeCalculation without setting maxSize or maxEntrySize");if(typeof this.sizeCalculation!="function")throw new TypeError("sizeCalculation set to non-function")}if(S!==void 0&&typeof S!="function")throw new TypeError("memoMethod must be a function if defined");if(this.#w=S,g!==void 0&&typeof g!="function")throw new TypeError("fetchMethod must be a function if specified");if(this.#S=g,this.#A=!!g,this.#f=new Map,this.#a=new Array(e).fill(void 0),this.#i=new Array(e).fill(void 0),this.#d=new Z(e),this.#E=new Z(e),this.#b=0,this.#p=0,this.#R=ri.create(e),this.#h=0,this.#u=0,typeof l=="function"&&(this.#n=l),typeof u=="function"&&(this.#r=u),typeof c=="function"?(this.#o=c,this.#m=[]):(this.#o=void 0,this.#m=void 0),this.#x=!!this.#n,this.#_=!!this.#r,this.#e=!!this.#o,this.noDisposeOnSet=!!d,this.noUpdateTTL=!!f,this.noDeleteOnFetchRejection=!!E,this.allowStaleOnFetchRejection=!!b,this.allowStaleOnFetchAbort=!!z,this.ignoreFetchAbort=!!$,this.maxEntrySize!==0){if(this.#s!==0&&!q(this.#s))throw new TypeError("maxSize must be a positive integer if specified");if(!q(this.maxEntrySize))throw new TypeError("maxEntrySize must be a positive integer if specified");this.#G();}if(this.allowStale=!!a,this.noDeleteOnStaleGet=!!y,this.updateAgeOnGet=!!o,this.updateAgeOnHas=!!h,this.ttlResolution=q(i)||i===0?i:1,this.ttlAutopurge=!!r,this.ttl=s||0,this.ttl){if(!q(this.ttl))throw new TypeError("ttl must be a positive integer if specified");this.#M();}if(this.#t===0&&this.ttl===0&&this.#s===0)throw new TypeError("At least one of max, maxSize, or ttl is required");if(!this.ttlAutopurge&&!this.#t&&!this.#s){let $t="LRU_CACHE_UNBOUNDED";ii($t)&&(Oe.add($t),Fe("TTL caching without ttlAutopurge, max, or maxSize can result in unbounded memory consumption.","UnboundedCacheWarning",$t,Me));}}getRemainingTTL(t){return this.#f.has(t)?1/0:0}#M(){let t=new Tt(this.#t),e=new Tt(this.#t);this.#g=t,this.#T=e;let s=this.ttlAutopurge?new Array(this.#t):void 0;this.#y=s,this.#j=(o,h,a=this.#c.now())=>{if(e[o]=h!==0?a:0,t[o]=h,s?.[o]&&(clearTimeout(s[o]),s[o]=void 0),h!==0&&s){let l=setTimeout(()=>{this.#v(o)&&this.#O(this.#a[o],"expire");},h+1);l.unref&&l.unref(),s[o]=l;}},this.#k=o=>{e[o]=t[o]!==0?this.#c.now():0;},this.#N=(o,h)=>{if(t[h]){let a=t[h],l=e[h];if(!a||!l)return;o.ttl=a,o.start=l,o.now=i||r();let u=o.now-l;o.remainingTTL=a-u;}};let i=0,r=()=>{let o=this.#c.now();if(this.ttlResolution>0){i=o;let h=setTimeout(()=>i=0,this.ttlResolution);h.unref&&h.unref();}return o};this.getRemainingTTL=o=>{let h=this.#f.get(o);if(h===void 0)return 0;let a=t[h],l=e[h];if(!a||!l)return 1/0;let u=(i||r())-l;return a-u},this.#v=o=>{let h=e[o],a=t[o];return !!a&&!!h&&(i||r())-h>a};}#k=()=>{};#N=()=>{};#j=()=>{};#v=()=>false;#G(){let t=new Tt(this.#t);this.#u=0,this.#C=t,this.#P=e=>{this.#u-=t[e],t[e]=0;},this.#I=(e,s,i,r)=>{if(this.#l(s))return 0;if(!q(i))if(r){if(typeof r!="function")throw new TypeError("sizeCalculation must be a function");if(i=r(s,e),!q(i))throw new TypeError("sizeCalculation return invalid (expect positive integer)")}else throw new TypeError("invalid size value (must be positive integer). When maxSize or maxEntrySize is used, sizeCalculation or size must be set.");return i},this.#L=(e,s,i)=>{if(t[e]=s,this.#s){let r=this.#s-t[e];for(;this.#u>r;)this.#B(true);}this.#u+=t[e],i&&(i.entrySize=s,i.totalCalculatedSize=this.#u);};}#P=t=>{};#L=(t,e,s)=>{};#I=(t,e,s,i)=>{if(s||i)throw new TypeError("cannot set size without setting maxSize or maxEntrySize on cache");return 0};*#F({allowStale:t=this.allowStale}={}){if(this.#h)for(let e=this.#p;!(!this.#z(e)||((t||!this.#v(e))&&(yield e),e===this.#b));)e=this.#E[e];}*#D({allowStale:t=this.allowStale}={}){if(this.#h)for(let e=this.#b;!(!this.#z(e)||((t||!this.#v(e))&&(yield e),e===this.#p));)e=this.#d[e];}#z(t){return t!==void 0&&this.#f.get(this.#a[t])===t}*entries(){for(let t of this.#F())this.#i[t]!==void 0&&this.#a[t]!==void 0&&!this.#l(this.#i[t])&&(yield [this.#a[t],this.#i[t]]);}*rentries(){for(let t of this.#D())this.#i[t]!==void 0&&this.#a[t]!==void 0&&!this.#l(this.#i[t])&&(yield [this.#a[t],this.#i[t]]);}*keys(){for(let t of this.#F()){let e=this.#a[t];e!==void 0&&!this.#l(this.#i[t])&&(yield e);}}*rkeys(){for(let t of this.#D()){let e=this.#a[t];e!==void 0&&!this.#l(this.#i[t])&&(yield e);}}*values(){for(let t of this.#F())this.#i[t]!==void 0&&!this.#l(this.#i[t])&&(yield this.#i[t]);}*rvalues(){for(let t of this.#D())this.#i[t]!==void 0&&!this.#l(this.#i[t])&&(yield this.#i[t]);}[Symbol.iterator](){return this.entries()}[Symbol.toStringTag]="LRUCache";find(t,e={}){for(let s of this.#F()){let i=this.#i[s],r=this.#l(i)?i.__staleWhileFetching:i;if(r!==void 0&&t(r,this.#a[s],this))return this.get(this.#a[s],e)}}forEach(t,e=this){for(let s of this.#F()){let i=this.#i[s],r=this.#l(i)?i.__staleWhileFetching:i;r!==void 0&&t.call(e,r,this.#a[s],this);}}rforEach(t,e=this){for(let s of this.#D()){let i=this.#i[s],r=this.#l(i)?i.__staleWhileFetching:i;r!==void 0&&t.call(e,r,this.#a[s],this);}}purgeStale(){let t=false;for(let e of this.#D({allowStale:true}))this.#v(e)&&(this.#O(this.#a[e],"expire"),t=true);return t}info(t){let e=this.#f.get(t);if(e===void 0)return;let s=this.#i[e],i=this.#l(s)?s.__staleWhileFetching:s;if(i===void 0)return;let r={value:i};if(this.#g&&this.#T){let o=this.#g[e],h=this.#T[e];if(o&&h){let a=o-(this.#c.now()-h);r.ttl=a,r.start=Date.now();}}return this.#C&&(r.size=this.#C[e]),r}dump(){let t=[];for(let e of this.#F({allowStale:true})){let s=this.#a[e],i=this.#i[e],r=this.#l(i)?i.__staleWhileFetching:i;if(r===void 0||s===void 0)continue;let o={value:r};if(this.#g&&this.#T){o.ttl=this.#g[e];let h=this.#c.now()-this.#T[e];o.start=Math.floor(Date.now()-h);}this.#C&&(o.size=this.#C[e]),t.unshift([s,o]);}return t}load(t){this.clear();for(let[e,s]of t){if(s.start){let i=Date.now()-s.start;s.start=this.#c.now()-i;}this.set(e,s.value,s);}}set(t,e,s={}){if(e===void 0)return this.delete(t),this;let{ttl:i=this.ttl,start:r,noDisposeOnSet:o=this.noDisposeOnSet,sizeCalculation:h=this.sizeCalculation,status:a}=s,{noUpdateTTL:l=this.noUpdateTTL}=s,u=this.#I(t,e,s.size||0,h);if(this.maxEntrySize&&u>this.maxEntrySize)return a&&(a.set="miss",a.maxEntrySizeExceeded=true),this.#O(t,"set"),this;let c=this.#h===0?void 0:this.#f.get(t);if(c===void 0)c=this.#h===0?this.#p:this.#R.length!==0?this.#R.pop():this.#h===this.#t?this.#B(false):this.#h,this.#a[c]=t,this.#i[c]=e,this.#f.set(t,c),this.#d[this.#p]=c,this.#E[c]=this.#p,this.#p=c,this.#h++,this.#L(c,u,a),a&&(a.set="add"),l=false,this.#_&&this.#r?.(e,t,"add");else {this.#W(c);let d=this.#i[c];if(e!==d){if(this.#A&&this.#l(d)){d.__abortController.abort(new Error("replaced"));let{__staleWhileFetching:f}=d;f!==void 0&&!o&&(this.#x&&this.#n?.(f,t,"set"),this.#e&&this.#m?.push([f,t,"set"]));}else o||(this.#x&&this.#n?.(d,t,"set"),this.#e&&this.#m?.push([d,t,"set"]));if(this.#P(c),this.#L(c,u,a),this.#i[c]=e,a){a.set="replace";let f=d&&this.#l(d)?d.__staleWhileFetching:d;f!==void 0&&(a.oldValue=f);}}else a&&(a.set="update");this.#_&&this.onInsert?.(e,t,e===d?"update":"replace");}if(i!==0&&!this.#g&&this.#M(),this.#g&&(l||this.#j(c,i,r),a&&this.#N(a,c)),!o&&this.#e&&this.#m){let d=this.#m,f;for(;f=d?.shift();)this.#o?.(...f);}return this}pop(){try{for(;this.#h;){let t=this.#i[this.#b];if(this.#B(!0),this.#l(t)){if(t.__staleWhileFetching)return t.__staleWhileFetching}else if(t!==void 0)return t}}finally{if(this.#e&&this.#m){let t=this.#m,e;for(;e=t?.shift();)this.#o?.(...e);}}}#B(t){let e=this.#b,s=this.#a[e],i=this.#i[e];return this.#A&&this.#l(i)?i.__abortController.abort(new Error("evicted")):(this.#x||this.#e)&&(this.#x&&this.#n?.(i,s,"evict"),this.#e&&this.#m?.push([i,s,"evict"])),this.#P(e),this.#y?.[e]&&(clearTimeout(this.#y[e]),this.#y[e]=void 0),t&&(this.#a[e]=void 0,this.#i[e]=void 0,this.#R.push(e)),this.#h===1?(this.#b=this.#p=0,this.#R.length=0):this.#b=this.#d[e],this.#f.delete(s),this.#h--,e}has(t,e={}){let{updateAgeOnHas:s=this.updateAgeOnHas,status:i}=e,r=this.#f.get(t);if(r!==void 0){let o=this.#i[r];if(this.#l(o)&&o.__staleWhileFetching===void 0)return  false;if(this.#v(r))i&&(i.has="stale",this.#N(i,r));else return s&&this.#k(r),i&&(i.has="hit",this.#N(i,r)),true}else i&&(i.has="miss");return  false}peek(t,e={}){let{allowStale:s=this.allowStale}=e,i=this.#f.get(t);if(i===void 0||!s&&this.#v(i))return;let r=this.#i[i];return this.#l(r)?r.__staleWhileFetching:r}#U(t,e,s,i){let r=e===void 0?void 0:this.#i[e];if(this.#l(r))return r;let o=new At,{signal:h}=s;h?.addEventListener("abort",()=>o.abort(h.reason),{signal:o.signal});let a={signal:o.signal,options:s,context:i},l=(p,w=false)=>{let{aborted:g}=o.signal,S=s.ignoreFetchAbort&&p!==void 0,E=s.ignoreFetchAbort||!!(s.allowStaleOnFetchAbort&&p!==void 0);if(s.status&&(g&&!w?(s.status.fetchAborted=true,s.status.fetchError=o.signal.reason,S&&(s.status.fetchAbortIgnored=true)):s.status.fetchResolved=true),g&&!S&&!w)return c(o.signal.reason,E);let y=f,b=this.#i[e];return (b===f||S&&w&&b===void 0)&&(p===void 0?y.__staleWhileFetching!==void 0?this.#i[e]=y.__staleWhileFetching:this.#O(t,"fetch"):(s.status&&(s.status.fetchUpdated=true),this.set(t,p,a.options))),p},u=p=>(s.status&&(s.status.fetchRejected=true,s.status.fetchError=p),c(p,false)),c=(p,w)=>{let{aborted:g}=o.signal,S=g&&s.allowStaleOnFetchAbort,E=S||s.allowStaleOnFetchRejection,y=E||s.noDeleteOnFetchRejection,b=f;if(this.#i[e]===f&&(!y||!w&&b.__staleWhileFetching===void 0?this.#O(t,"fetch"):S||(this.#i[e]=b.__staleWhileFetching)),E)return s.status&&b.__staleWhileFetching!==void 0&&(s.status.returnedStale=true),b.__staleWhileFetching;if(b.__returned===b)throw p},d=(p,w)=>{let g=this.#S?.(t,r,a);g&&g instanceof Promise&&g.then(S=>p(S===void 0?void 0:S),w),o.signal.addEventListener("abort",()=>{(!s.ignoreFetchAbort||s.allowStaleOnFetchAbort)&&(p(void 0),s.allowStaleOnFetchAbort&&(p=S=>l(S,true)));});};s.status&&(s.status.fetchDispatched=true);let f=new Promise(d).then(l,u),m=Object.assign(f,{__abortController:o,__staleWhileFetching:r,__returned:void 0});return e===void 0?(this.set(t,m,{...a.options,status:void 0}),e=this.#f.get(t)):this.#i[e]=m,m}#l(t){if(!this.#A)return  false;let e=t;return !!e&&e instanceof Promise&&e.hasOwnProperty("__staleWhileFetching")&&e.__abortController instanceof At}async fetch(t,e={}){let{allowStale:s=this.allowStale,updateAgeOnGet:i=this.updateAgeOnGet,noDeleteOnStaleGet:r=this.noDeleteOnStaleGet,ttl:o=this.ttl,noDisposeOnSet:h=this.noDisposeOnSet,size:a=0,sizeCalculation:l=this.sizeCalculation,noUpdateTTL:u=this.noUpdateTTL,noDeleteOnFetchRejection:c=this.noDeleteOnFetchRejection,allowStaleOnFetchRejection:d=this.allowStaleOnFetchRejection,ignoreFetchAbort:f=this.ignoreFetchAbort,allowStaleOnFetchAbort:m=this.allowStaleOnFetchAbort,context:p,forceRefresh:w=false,status:g,signal:S}=e;if(!this.#A)return g&&(g.fetch="get"),this.get(t,{allowStale:s,updateAgeOnGet:i,noDeleteOnStaleGet:r,status:g});let E={allowStale:s,updateAgeOnGet:i,noDeleteOnStaleGet:r,ttl:o,noDisposeOnSet:h,size:a,sizeCalculation:l,noUpdateTTL:u,noDeleteOnFetchRejection:c,allowStaleOnFetchRejection:d,allowStaleOnFetchAbort:m,ignoreFetchAbort:f,status:g,signal:S},y=this.#f.get(t);if(y===void 0){g&&(g.fetch="miss");let b=this.#U(t,y,E,p);return b.__returned=b}else {let b=this.#i[y];if(this.#l(b)){let Z=s&&b.__staleWhileFetching!==void 0;return g&&(g.fetch="inflight",Z&&(g.returnedStale=true)),Z?b.__staleWhileFetching:b.__returned=b}let z=this.#v(y);if(!w&&!z)return g&&(g.fetch="hit"),this.#W(y),i&&this.#k(y),g&&this.#N(g,y),b;let $=this.#U(t,y,E,p),J=$.__staleWhileFetching!==void 0&&s;return g&&(g.fetch=z?"stale":"refresh",J&&z&&(g.returnedStale=true)),J?$.__staleWhileFetching:$.__returned=$}}async forceFetch(t,e={}){let s=await this.fetch(t,e);if(s===void 0)throw new Error("fetch() returned undefined");return s}memo(t,e={}){let s=this.#w;if(!s)throw new Error("no memoMethod provided to constructor");let{context:i,forceRefresh:r,...o}=e,h=this.get(t,o);if(!r&&h!==void 0)return h;let a=s(t,h,{options:o,context:i});return this.set(t,a,o),a}get(t,e={}){let{allowStale:s=this.allowStale,updateAgeOnGet:i=this.updateAgeOnGet,noDeleteOnStaleGet:r=this.noDeleteOnStaleGet,status:o}=e,h=this.#f.get(t);if(h!==void 0){let a=this.#i[h],l=this.#l(a);return o&&this.#N(o,h),this.#v(h)?(o&&(o.get="stale"),l?(o&&s&&a.__staleWhileFetching!==void 0&&(o.returnedStale=true),s?a.__staleWhileFetching:void 0):(r||this.#O(t,"expire"),o&&s&&(o.returnedStale=true),s?a:void 0)):(o&&(o.get="hit"),l?a.__staleWhileFetching:(this.#W(h),i&&this.#k(h),a))}else o&&(o.get="miss");}#$(t,e){this.#E[e]=t,this.#d[t]=e;}#W(t){t!==this.#p&&(t===this.#b?this.#b=this.#d[t]:this.#$(this.#E[t],this.#d[t]),this.#$(this.#p,t),this.#p=t);}delete(t){return this.#O(t,"delete")}#O(t,e){let s=false;if(this.#h!==0){let i=this.#f.get(t);if(i!==void 0)if(this.#y?.[i]&&(clearTimeout(this.#y?.[i]),this.#y[i]=void 0),s=true,this.#h===1)this.#H(e);else {this.#P(i);let r=this.#i[i];if(this.#l(r)?r.__abortController.abort(new Error("deleted")):(this.#x||this.#e)&&(this.#x&&this.#n?.(r,t,e),this.#e&&this.#m?.push([r,t,e])),this.#f.delete(t),this.#a[i]=void 0,this.#i[i]=void 0,i===this.#p)this.#p=this.#E[i];else if(i===this.#b)this.#b=this.#d[i];else {let o=this.#E[i];this.#d[o]=this.#d[i];let h=this.#d[i];this.#E[h]=this.#E[i];}this.#h--,this.#R.push(i);}}if(this.#e&&this.#m?.length){let i=this.#m,r;for(;r=i?.shift();)this.#o?.(...r);}return s}clear(){return this.#H("delete")}#H(t){for(let e of this.#D({allowStale:true})){let s=this.#i[e];if(this.#l(s))s.__abortController.abort(new Error("deleted"));else {let i=this.#a[e];this.#x&&this.#n?.(s,i,t),this.#e&&this.#m?.push([s,i,t]);}}if(this.#f.clear(),this.#i.fill(void 0),this.#a.fill(void 0),this.#g&&this.#T){this.#g.fill(0),this.#T.fill(0);for(let e of this.#y??[])e!==void 0&&clearTimeout(e);this.#y?.fill(void 0);}if(this.#C&&this.#C.fill(0),this.#b=0,this.#p=0,this.#R.length=0,this.#u=0,this.#h=0,this.#e&&this.#m){let e=this.#m,s;for(;s=e?.shift();)this.#o?.(...s);}}};var Ne=typeof process=="object"&&process?process:{stdout:null,stderr:null},oi=n=>!!n&&typeof n=="object"&&(n instanceof V||n instanceof require$$0$2||hi(n)||ai(n)),hi=n=>!!n&&typeof n=="object"&&n instanceof require$$0.EventEmitter&&typeof n.pipe=="function"&&n.pipe!==require$$0$2.Writable.prototype.pipe,ai=n=>!!n&&typeof n=="object"&&n instanceof require$$0.EventEmitter&&typeof n.write=="function"&&typeof n.end=="function",G=Symbol("EOF"),H=Symbol("maybeEmitEnd"),K=Symbol("emittedEnd"),kt=Symbol("emittingEnd"),ut=Symbol("emittedError"),Rt=Symbol("closed"),_e=Symbol("read"),Ot=Symbol("flush"),Le=Symbol("flushChunk"),P=Symbol("encoding"),et=Symbol("decoder"),v=Symbol("flowing"),dt=Symbol("paused"),st=Symbol("resume"),C=Symbol("buffer"),F=Symbol("pipes"),T=Symbol("bufferLength"),Yt=Symbol("bufferPush"),Ft=Symbol("bufferShift"),k=Symbol("objectMode"),x=Symbol("destroyed"),Xt=Symbol("error"),Jt=Symbol("emitData"),We=Symbol("emitEnd"),Zt=Symbol("emitEnd2"),B=Symbol("async"),Qt=Symbol("abort"),Dt=Symbol("aborted"),pt=Symbol("signal"),Y=Symbol("dataListeners"),M=Symbol("discarded"),mt=n=>Promise.resolve().then(n),li=n=>n(),ci=n=>n==="end"||n==="finish"||n==="prefinish",fi=n=>n instanceof ArrayBuffer||!!n&&typeof n=="object"&&n.constructor&&n.constructor.name==="ArrayBuffer"&&n.byteLength>=0,ui=n=>!Buffer.isBuffer(n)&&ArrayBuffer.isView(n),Mt=class{src;dest;opts;ondrain;constructor(t,e,s){this.src=t,this.dest=e,this.opts=s,this.ondrain=()=>t[st](),this.dest.on("drain",this.ondrain);}unpipe(){this.dest.removeListener("drain",this.ondrain);}proxyErrors(t){}end(){this.unpipe(),this.opts.end&&this.dest.end();}},te=class extends Mt{unpipe(){this.src.removeListener("error",this.proxyErrors),super.unpipe();}constructor(t,e,s){super(t,e,s),this.proxyErrors=i=>this.dest.emit("error",i),t.on("error",this.proxyErrors);}},di=n=>!!n.objectMode,pi=n=>!n.objectMode&&!!n.encoding&&n.encoding!=="buffer",V=class extends require$$0.EventEmitter{[v]=false;[dt]=false;[F]=[];[C]=[];[k];[P];[B];[et];[G]=false;[K]=false;[kt]=false;[Rt]=false;[ut]=null;[T]=0;[x]=false;[pt];[Dt]=false;[Y]=0;[M]=false;writable=true;readable=true;constructor(...t){let e=t[0]||{};if(super(),e.objectMode&&typeof e.encoding=="string")throw new TypeError("Encoding and objectMode may not be used together");di(e)?(this[k]=true,this[P]=null):pi(e)?(this[P]=e.encoding,this[k]=false):(this[k]=false,this[P]=null),this[B]=!!e.async,this[et]=this[P]?new node_string_decoder.StringDecoder(this[P]):null,e&&e.debugExposeBuffer===true&&Object.defineProperty(this,"buffer",{get:()=>this[C]}),e&&e.debugExposePipes===true&&Object.defineProperty(this,"pipes",{get:()=>this[F]});let{signal:s}=e;s&&(this[pt]=s,s.aborted?this[Qt]():s.addEventListener("abort",()=>this[Qt]()));}get bufferLength(){return this[T]}get encoding(){return this[P]}set encoding(t){throw new Error("Encoding must be set at instantiation time")}setEncoding(t){throw new Error("Encoding must be set at instantiation time")}get objectMode(){return this[k]}set objectMode(t){throw new Error("objectMode must be set at instantiation time")}get async(){return this[B]}set async(t){this[B]=this[B]||!!t;}[Qt](){this[Dt]=true,this.emit("abort",this[pt]?.reason),this.destroy(this[pt]?.reason);}get aborted(){return this[Dt]}set aborted(t){}write(t,e,s){if(this[Dt])return  false;if(this[G])throw new Error("write after end");if(this[x])return this.emit("error",Object.assign(new Error("Cannot call write after a stream was destroyed"),{code:"ERR_STREAM_DESTROYED"})),true;typeof e=="function"&&(s=e,e="utf8"),e||(e="utf8");let i=this[B]?mt:li;if(!this[k]&&!Buffer.isBuffer(t)){if(ui(t))t=Buffer.from(t.buffer,t.byteOffset,t.byteLength);else if(fi(t))t=Buffer.from(t);else if(typeof t!="string")throw new Error("Non-contiguous data written to non-objectMode stream")}return this[k]?(this[v]&&this[T]!==0&&this[Ot](true),this[v]?this.emit("data",t):this[Yt](t),this[T]!==0&&this.emit("readable"),s&&i(s),this[v]):t.length?(typeof t=="string"&&!(e===this[P]&&!this[et]?.lastNeed)&&(t=Buffer.from(t,e)),Buffer.isBuffer(t)&&this[P]&&(t=this[et].write(t)),this[v]&&this[T]!==0&&this[Ot](true),this[v]?this.emit("data",t):this[Yt](t),this[T]!==0&&this.emit("readable"),s&&i(s),this[v]):(this[T]!==0&&this.emit("readable"),s&&i(s),this[v])}read(t){if(this[x])return null;if(this[M]=false,this[T]===0||t===0||t&&t>this[T])return this[H](),null;this[k]&&(t=null),this[C].length>1&&!this[k]&&(this[C]=[this[P]?this[C].join(""):Buffer.concat(this[C],this[T])]);let e=this[_e](t||null,this[C][0]);return this[H](),e}[_e](t,e){if(this[k])this[Ft]();else {let s=e;t===s.length||t===null?this[Ft]():typeof s=="string"?(this[C][0]=s.slice(t),e=s.slice(0,t),this[T]-=t):(this[C][0]=s.subarray(t),e=s.subarray(0,t),this[T]-=t);}return this.emit("data",e),!this[C].length&&!this[G]&&this.emit("drain"),e}end(t,e,s){return typeof t=="function"&&(s=t,t=void 0),typeof e=="function"&&(s=e,e="utf8"),t!==void 0&&this.write(t,e),s&&this.once("end",s),this[G]=true,this.writable=false,(this[v]||!this[dt])&&this[H](),this}[st](){this[x]||(!this[Y]&&!this[F].length&&(this[M]=true),this[dt]=false,this[v]=true,this.emit("resume"),this[C].length?this[Ot]():this[G]?this[H]():this.emit("drain"));}resume(){return this[st]()}pause(){this[v]=false,this[dt]=true,this[M]=false;}get destroyed(){return this[x]}get flowing(){return this[v]}get paused(){return this[dt]}[Yt](t){this[k]?this[T]+=1:this[T]+=t.length,this[C].push(t);}[Ft](){return this[k]?this[T]-=1:this[T]-=this[C][0].length,this[C].shift()}[Ot](t=false){do;while(this[Le](this[Ft]())&&this[C].length);!t&&!this[C].length&&!this[G]&&this.emit("drain");}[Le](t){return this.emit("data",t),this[v]}pipe(t,e){if(this[x])return t;this[M]=false;let s=this[K];return e=e||{},t===Ne.stdout||t===Ne.stderr?e.end=false:e.end=e.end!==false,e.proxyErrors=!!e.proxyErrors,s?e.end&&t.end():(this[F].push(e.proxyErrors?new te(this,t,e):new Mt(this,t,e)),this[B]?mt(()=>this[st]()):this[st]()),t}unpipe(t){let e=this[F].find(s=>s.dest===t);e&&(this[F].length===1?(this[v]&&this[Y]===0&&(this[v]=false),this[F]=[]):this[F].splice(this[F].indexOf(e),1),e.unpipe());}addListener(t,e){return this.on(t,e)}on(t,e){let s=super.on(t,e);if(t==="data")this[M]=false,this[Y]++,!this[F].length&&!this[v]&&this[st]();else if(t==="readable"&&this[T]!==0)super.emit("readable");else if(ci(t)&&this[K])super.emit(t),this.removeAllListeners(t);else if(t==="error"&&this[ut]){let i=e;this[B]?mt(()=>i.call(this,this[ut])):i.call(this,this[ut]);}return s}removeListener(t,e){return this.off(t,e)}off(t,e){let s=super.off(t,e);return t==="data"&&(this[Y]=this.listeners("data").length,this[Y]===0&&!this[M]&&!this[F].length&&(this[v]=false)),s}removeAllListeners(t){let e=super.removeAllListeners(t);return (t==="data"||t===void 0)&&(this[Y]=0,!this[M]&&!this[F].length&&(this[v]=false)),e}get emittedEnd(){return this[K]}[H](){!this[kt]&&!this[K]&&!this[x]&&this[C].length===0&&this[G]&&(this[kt]=true,this.emit("end"),this.emit("prefinish"),this.emit("finish"),this[Rt]&&this.emit("close"),this[kt]=false);}emit(t,...e){let s=e[0];if(t!=="error"&&t!=="close"&&t!==x&&this[x])return  false;if(t==="data")return !this[k]&&!s?false:this[B]?(mt(()=>this[Jt](s)),true):this[Jt](s);if(t==="end")return this[We]();if(t==="close"){if(this[Rt]=true,!this[K]&&!this[x])return  false;let r=super.emit("close");return this.removeAllListeners("close"),r}else if(t==="error"){this[ut]=s,super.emit(Xt,s);let r=!this[pt]||this.listeners("error").length?super.emit("error",s):false;return this[H](),r}else if(t==="resume"){let r=super.emit("resume");return this[H](),r}else if(t==="finish"||t==="prefinish"){let r=super.emit(t);return this.removeAllListeners(t),r}let i=super.emit(t,...e);return this[H](),i}[Jt](t){for(let s of this[F])s.dest.write(t)===false&&this.pause();let e=this[M]?false:super.emit("data",t);return this[H](),e}[We](){return this[K]?false:(this[K]=true,this.readable=false,this[B]?(mt(()=>this[Zt]()),true):this[Zt]())}[Zt](){if(this[et]){let e=this[et].end();if(e){for(let s of this[F])s.dest.write(e);this[M]||super.emit("data",e);}}for(let e of this[F])e.end();let t=super.emit("end");return this.removeAllListeners("end"),t}async collect(){let t=Object.assign([],{dataLength:0});this[k]||(t.dataLength=0);let e=this.promise();return this.on("data",s=>{t.push(s),this[k]||(t.dataLength+=s.length);}),await e,t}async concat(){if(this[k])throw new Error("cannot concat in objectMode");let t=await this.collect();return this[P]?t.join(""):Buffer.concat(t,t.dataLength)}async promise(){return new Promise((t,e)=>{this.on(x,()=>e(new Error("stream destroyed"))),this.on("error",s=>e(s)),this.on("end",()=>t());})}[Symbol.asyncIterator](){this[M]=false;let t=false,e=async()=>(this.pause(),t=true,{value:void 0,done:true});return {next:()=>{if(t)return e();let i=this.read();if(i!==null)return Promise.resolve({done:false,value:i});if(this[G])return e();let r,o,h=c=>{this.off("data",a),this.off("end",l),this.off(x,u),e(),o(c);},a=c=>{this.off("error",h),this.off("end",l),this.off(x,u),this.pause(),r({value:c,done:!!this[G]});},l=()=>{this.off("error",h),this.off("data",a),this.off(x,u),e(),r({done:true,value:void 0});},u=()=>h(new Error("stream destroyed"));return new Promise((c,d)=>{o=d,r=c,this.once(x,u),this.once("error",h),this.once("end",l),this.once("data",a);})},throw:e,return:e,[Symbol.asyncIterator](){return this},[Symbol.asyncDispose]:async()=>{}}}[Symbol.iterator](){this[M]=false;let t=false,e=()=>(this.pause(),this.off(Xt,e),this.off(x,e),this.off("end",e),t=true,{done:true,value:void 0}),s=()=>{if(t)return e();let i=this.read();return i===null?e():{done:false,value:i}};return this.once("end",e),this.once(Xt,e),this.once(x,e),{next:s,throw:e,return:e,[Symbol.iterator](){return this},[Symbol.dispose]:()=>{}}}destroy(t){if(this[x])return t?this.emit("error",t):this.emit(x),this;this[x]=true,this[M]=true,this[C].length=0,this[T]=0;let e=this;return typeof e.close=="function"&&!this[Rt]&&e.close(),t?this.emit("error",t):this.emit(x),this}static get isStream(){return oi}};var vi=fs$1.realpathSync.native,wt={lstatSync:fs$1.lstatSync,readdir:fs$1.readdir,readdirSync:fs$1.readdirSync,readlinkSync:fs$1.readlinkSync,realpathSync:vi,promises:{lstat:require$$0$6.lstat,readdir:require$$0$6.readdir,readlink:require$$0$6.readlink,realpath:require$$0$6.realpath}},Ue=n=>!n||n===wt||n===xi__namespace?wt:{...wt,...n,promises:{...wt.promises,...n.promises||{}}},$e=/^\\\\\?\\([a-z]:)\\?$/i,Ri=n=>n.replace(/\//g,"\\").replace($e,"$1\\"),Oi=/[\\\/]/,L=0,Ge=1,He=2,U=4,qe=6,Ke=8,X=10,Ve=12,_=15,gt=~_,se=16,je=32,yt=64,j=128,Nt=256,Lt=512,Ie=yt|j|Lt,Fi=1023,ie=n=>n.isFile()?Ke:n.isDirectory()?U:n.isSymbolicLink()?X:n.isCharacterDevice()?He:n.isBlockDevice()?qe:n.isSocket()?Ve:n.isFIFO()?Ge:L,ze=new ft({max:2**12}),bt=n=>{let t=ze.get(n);if(t)return t;let e=n.normalize("NFKD");return ze.set(n,e),e},Be=new ft({max:2**12}),_t=n=>{let t=Be.get(n);if(t)return t;let e=bt(n.toLowerCase());return Be.set(n,e),e},Wt=class extends ft{constructor(){super({max:256});}},ne=class extends ft{constructor(t=16*1024){super({maxSize:t,sizeCalculation:e=>e.length+1});}},Ye=Symbol("PathScurry setAsCwd"),R=class{name;root;roots;parent;nocase;isCWD=false;#t;#s;get dev(){return this.#s}#n;get mode(){return this.#n}#r;get nlink(){return this.#r}#o;get uid(){return this.#o}#S;get gid(){return this.#S}#w;get rdev(){return this.#w}#c;get blksize(){return this.#c}#h;get ino(){return this.#h}#u;get size(){return this.#u}#f;get blocks(){return this.#f}#a;get atimeMs(){return this.#a}#i;get mtimeMs(){return this.#i}#d;get ctimeMs(){return this.#d}#E;get birthtimeMs(){return this.#E}#b;get atime(){return this.#b}#p;get mtime(){return this.#p}#R;get ctime(){return this.#R}#m;get birthtime(){return this.#m}#C;#T;#g;#y;#x;#A;#e;#_;#M;#k;get parentPath(){return (this.parent||this).fullpath()}get path(){return this.parentPath}constructor(t,e=L,s,i,r,o,h){this.name=t,this.#C=r?_t(t):bt(t),this.#e=e&Fi,this.nocase=r,this.roots=i,this.root=s||this,this.#_=o,this.#g=h.fullpath,this.#x=h.relative,this.#A=h.relativePosix,this.parent=h.parent,this.parent?this.#t=this.parent.#t:this.#t=Ue(h.fs);}depth(){return this.#T!==void 0?this.#T:this.parent?this.#T=this.parent.depth()+1:this.#T=0}childrenCache(){return this.#_}resolve(t){if(!t)return this;let e=this.getRootString(t),i=t.substring(e.length).split(this.splitSep);return e?this.getRoot(e).#N(i):this.#N(i)}#N(t){let e=this;for(let s of t)e=e.child(s);return e}children(){let t=this.#_.get(this);if(t)return t;let e=Object.assign([],{provisional:0});return this.#_.set(this,e),this.#e&=~se,e}child(t,e){if(t===""||t===".")return this;if(t==="..")return this.parent||this;let s=this.children(),i=this.nocase?_t(t):bt(t);for(let a of s)if(a.#C===i)return a;let r=this.parent?this.sep:"",o=this.#g?this.#g+r+t:void 0,h=this.newChild(t,L,{...e,parent:this,fullpath:o});return this.canReaddir()||(h.#e|=j),s.push(h),h}relative(){if(this.isCWD)return "";if(this.#x!==void 0)return this.#x;let t=this.name,e=this.parent;if(!e)return this.#x=this.name;let s=e.relative();return s+(!s||!e.parent?"":this.sep)+t}relativePosix(){if(this.sep==="/")return this.relative();if(this.isCWD)return "";if(this.#A!==void 0)return this.#A;let t=this.name,e=this.parent;if(!e)return this.#A=this.fullpathPosix();let s=e.relativePosix();return s+(!s||!e.parent?"":"/")+t}fullpath(){if(this.#g!==void 0)return this.#g;let t=this.name,e=this.parent;if(!e)return this.#g=this.name;let i=e.fullpath()+(e.parent?this.sep:"")+t;return this.#g=i}fullpathPosix(){if(this.#y!==void 0)return this.#y;if(this.sep==="/")return this.#y=this.fullpath();if(!this.parent){let i=this.fullpath().replace(/\\/g,"/");return /^[a-z]:\//i.test(i)?this.#y=`//?/${i}`:this.#y=i}let t=this.parent,e=t.fullpathPosix(),s=e+(!e||!t.parent?"":"/")+this.name;return this.#y=s}isUnknown(){return (this.#e&_)===L}isType(t){return this[`is${t}`]()}getType(){return this.isUnknown()?"Unknown":this.isDirectory()?"Directory":this.isFile()?"File":this.isSymbolicLink()?"SymbolicLink":this.isFIFO()?"FIFO":this.isCharacterDevice()?"CharacterDevice":this.isBlockDevice()?"BlockDevice":this.isSocket()?"Socket":"Unknown"}isFile(){return (this.#e&_)===Ke}isDirectory(){return (this.#e&_)===U}isCharacterDevice(){return (this.#e&_)===He}isBlockDevice(){return (this.#e&_)===qe}isFIFO(){return (this.#e&_)===Ge}isSocket(){return (this.#e&_)===Ve}isSymbolicLink(){return (this.#e&X)===X}lstatCached(){return this.#e&je?this:void 0}readlinkCached(){return this.#M}realpathCached(){return this.#k}readdirCached(){let t=this.children();return t.slice(0,t.provisional)}canReadlink(){if(this.#M)return  true;if(!this.parent)return  false;let t=this.#e&_;return !(t!==L&&t!==X||this.#e&Nt||this.#e&j)}calledReaddir(){return !!(this.#e&se)}isENOENT(){return !!(this.#e&j)}isNamed(t){return this.nocase?this.#C===_t(t):this.#C===bt(t)}async readlink(){let t=this.#M;if(t)return t;if(this.canReadlink()&&this.parent)try{let e=await this.#t.promises.readlink(this.fullpath()),s=(await this.parent.realpath())?.resolve(e);if(s)return this.#M=s}catch(e){this.#D(e.code);return}}readlinkSync(){let t=this.#M;if(t)return t;if(this.canReadlink()&&this.parent)try{let e=this.#t.readlinkSync(this.fullpath()),s=this.parent.realpathSync()?.resolve(e);if(s)return this.#M=s}catch(e){this.#D(e.code);return}}#j(t){this.#e|=se;for(let e=t.provisional;e<t.length;e++){let s=t[e];s&&s.#v();}}#v(){this.#e&j||(this.#e=(this.#e|j)&gt,this.#G());}#G(){let t=this.children();t.provisional=0;for(let e of t)e.#v();}#P(){this.#e|=Lt,this.#L();}#L(){if(this.#e&yt)return;let t=this.#e;(t&_)===U&&(t&=gt),this.#e=t|yt,this.#G();}#I(t=""){t==="ENOTDIR"||t==="EPERM"?this.#L():t==="ENOENT"?this.#v():this.children().provisional=0;}#F(t=""){t==="ENOTDIR"?this.parent.#L():t==="ENOENT"&&this.#v();}#D(t=""){let e=this.#e;e|=Nt,t==="ENOENT"&&(e|=j),(t==="EINVAL"||t==="UNKNOWN")&&(e&=gt),this.#e=e,t==="ENOTDIR"&&this.parent&&this.parent.#L();}#z(t,e){return this.#U(t,e)||this.#B(t,e)}#B(t,e){let s=ie(t),i=this.newChild(t.name,s,{parent:this}),r=i.#e&_;return r!==U&&r!==X&&r!==L&&(i.#e|=yt),e.unshift(i),e.provisional++,i}#U(t,e){for(let s=e.provisional;s<e.length;s++){let i=e[s];if((this.nocase?_t(t.name):bt(t.name))===i.#C)return this.#l(t,i,s,e)}}#l(t,e,s,i){let r=e.name;return e.#e=e.#e&gt|ie(t),r!==t.name&&(e.name=t.name),s!==i.provisional&&(s===i.length-1?i.pop():i.splice(s,1),i.unshift(e)),i.provisional++,e}async lstat(){if((this.#e&j)===0)try{return this.#$(await this.#t.promises.lstat(this.fullpath())),this}catch(t){this.#F(t.code);}}lstatSync(){if((this.#e&j)===0)try{return this.#$(this.#t.lstatSync(this.fullpath())),this}catch(t){this.#F(t.code);}}#$(t){let{atime:e,atimeMs:s,birthtime:i,birthtimeMs:r,blksize:o,blocks:h,ctime:a,ctimeMs:l,dev:u,gid:c,ino:d,mode:f,mtime:m,mtimeMs:p,nlink:w,rdev:g,size:S,uid:E}=t;this.#b=e,this.#a=s,this.#m=i,this.#E=r,this.#c=o,this.#f=h,this.#R=a,this.#d=l,this.#s=u,this.#S=c,this.#h=d,this.#n=f,this.#p=m,this.#i=p,this.#r=w,this.#w=g,this.#u=S,this.#o=E;let y=ie(t);this.#e=this.#e&gt|y|je,y!==L&&y!==U&&y!==X&&(this.#e|=yt);}#W=[];#O=false;#H(t){this.#O=false;let e=this.#W.slice();this.#W.length=0,e.forEach(s=>s(null,t));}readdirCB(t,e=false){if(!this.canReaddir()){e?t(null,[]):queueMicrotask(()=>t(null,[]));return}let s=this.children();if(this.calledReaddir()){let r=s.slice(0,s.provisional);e?t(null,r):queueMicrotask(()=>t(null,r));return}if(this.#W.push(t),this.#O)return;this.#O=true;let i=this.fullpath();this.#t.readdir(i,{withFileTypes:true},(r,o)=>{if(r)this.#I(r.code),s.provisional=0;else {for(let h of o)this.#z(h,s);this.#j(s);}this.#H(s.slice(0,s.provisional));});}#q;async readdir(){if(!this.canReaddir())return [];let t=this.children();if(this.calledReaddir())return t.slice(0,t.provisional);let e=this.fullpath();if(this.#q)await this.#q;else {let s=()=>{};this.#q=new Promise(i=>s=i);try{for(let i of await this.#t.promises.readdir(e,{withFileTypes:!0}))this.#z(i,t);this.#j(t);}catch(i){this.#I(i.code),t.provisional=0;}this.#q=void 0,s();}return t.slice(0,t.provisional)}readdirSync(){if(!this.canReaddir())return [];let t=this.children();if(this.calledReaddir())return t.slice(0,t.provisional);let e=this.fullpath();try{for(let s of this.#t.readdirSync(e,{withFileTypes:!0}))this.#z(s,t);this.#j(t);}catch(s){this.#I(s.code),t.provisional=0;}return t.slice(0,t.provisional)}canReaddir(){if(this.#e&Ie)return  false;let t=_&this.#e;return t===L||t===U||t===X}shouldWalk(t,e){return (this.#e&U)===U&&!(this.#e&Ie)&&!t.has(this)&&(!e||e(this))}async realpath(){if(this.#k)return this.#k;if(!((Lt|Nt|j)&this.#e))try{let t=await this.#t.promises.realpath(this.fullpath());return this.#k=this.resolve(t)}catch{this.#P();}}realpathSync(){if(this.#k)return this.#k;if(!((Lt|Nt|j)&this.#e))try{let t=this.#t.realpathSync(this.fullpath());return this.#k=this.resolve(t)}catch{this.#P();}}[Ye](t){if(t===this)return;t.isCWD=false,this.isCWD=true;let e=new Set([]),s=[],i=this;for(;i&&i.parent;)e.add(i),i.#x=s.join(this.sep),i.#A=s.join("/"),i=i.parent,s.push("..");for(i=t;i&&i.parent&&!e.has(i);)i.#x=void 0,i.#A=void 0,i=i.parent;}},Pt=class n extends R{sep="\\";splitSep=Oi;constructor(t,e=L,s,i,r,o,h){super(t,e,s,i,r,o,h);}newChild(t,e=L,s={}){return new n(t,e,this.root,this.roots,this.nocase,this.childrenCache(),s)}getRootString(t){return require$$1$5.win32.parse(t).root}getRoot(t){if(t=Ri(t.toUpperCase()),t===this.root.name)return this.root;for(let[e,s]of Object.entries(this.roots))if(this.sameRoot(t,e))return this.roots[t]=s;return this.roots[t]=new it(t,this).root}sameRoot(t,e=this.root.name){return t=t.toUpperCase().replace(/\//g,"\\").replace($e,"$1\\"),t===e}},jt=class n extends R{splitSep="/";sep="/";constructor(t,e=L,s,i,r,o,h){super(t,e,s,i,r,o,h);}getRootString(t){return t.startsWith("/")?"/":""}getRoot(t){return this.root}newChild(t,e=L,s={}){return new n(t,e,this.root,this.roots,this.nocase,this.childrenCache(),s)}},It=class{root;rootPath;roots;cwd;#t;#s;#n;nocase;#r;constructor(t=process.cwd(),e,s,{nocase:i,childrenCacheSize:r=16*1024,fs:o=wt}={}){this.#r=Ue(o),(t instanceof URL||t.startsWith("file://"))&&(t=require$$1$2.fileURLToPath(t));let h=e.resolve(t);this.roots=Object.create(null),this.rootPath=this.parseRootPath(h),this.#t=new Wt,this.#s=new Wt,this.#n=new ne(r);let a=h.substring(this.rootPath.length).split(s);if(a.length===1&&!a[0]&&a.pop(),i===void 0)throw new TypeError("must provide nocase setting to PathScurryBase ctor");this.nocase=i,this.root=this.newRoot(this.#r),this.roots[this.rootPath]=this.root;let l=this.root,u=a.length-1,c=e.sep,d=this.rootPath,f=false;for(let m of a){let p=u--;l=l.child(m,{relative:new Array(p).fill("..").join(c),relativePosix:new Array(p).fill("..").join("/"),fullpath:d+=(f?"":c)+m}),f=true;}this.cwd=l;}depth(t=this.cwd){return typeof t=="string"&&(t=this.cwd.resolve(t)),t.depth()}childrenCache(){return this.#n}resolve(...t){let e="";for(let r=t.length-1;r>=0;r--){let o=t[r];if(!(!o||o===".")&&(e=e?`${o}/${e}`:o,this.isAbsolute(o)))break}let s=this.#t.get(e);if(s!==void 0)return s;let i=this.cwd.resolve(e).fullpath();return this.#t.set(e,i),i}resolvePosix(...t){let e="";for(let r=t.length-1;r>=0;r--){let o=t[r];if(!(!o||o===".")&&(e=e?`${o}/${e}`:o,this.isAbsolute(o)))break}let s=this.#s.get(e);if(s!==void 0)return s;let i=this.cwd.resolve(e).fullpathPosix();return this.#s.set(e,i),i}relative(t=this.cwd){return typeof t=="string"&&(t=this.cwd.resolve(t)),t.relative()}relativePosix(t=this.cwd){return typeof t=="string"&&(t=this.cwd.resolve(t)),t.relativePosix()}basename(t=this.cwd){return typeof t=="string"&&(t=this.cwd.resolve(t)),t.name}dirname(t=this.cwd){return typeof t=="string"&&(t=this.cwd.resolve(t)),(t.parent||t).fullpath()}async readdir(t=this.cwd,e={withFileTypes:true}){typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t,t=this.cwd);let{withFileTypes:s}=e;if(t.canReaddir()){let i=await t.readdir();return s?i:i.map(r=>r.name)}else return []}readdirSync(t=this.cwd,e={withFileTypes:true}){typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t,t=this.cwd);let{withFileTypes:s=true}=e;return t.canReaddir()?s?t.readdirSync():t.readdirSync().map(i=>i.name):[]}async lstat(t=this.cwd){return typeof t=="string"&&(t=this.cwd.resolve(t)),t.lstat()}lstatSync(t=this.cwd){return typeof t=="string"&&(t=this.cwd.resolve(t)),t.lstatSync()}async readlink(t=this.cwd,{withFileTypes:e}={withFileTypes:false}){typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t.withFileTypes,t=this.cwd);let s=await t.readlink();return e?s:s?.fullpath()}readlinkSync(t=this.cwd,{withFileTypes:e}={withFileTypes:false}){typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t.withFileTypes,t=this.cwd);let s=t.readlinkSync();return e?s:s?.fullpath()}async realpath(t=this.cwd,{withFileTypes:e}={withFileTypes:false}){typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t.withFileTypes,t=this.cwd);let s=await t.realpath();return e?s:s?.fullpath()}realpathSync(t=this.cwd,{withFileTypes:e}={withFileTypes:false}){typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t.withFileTypes,t=this.cwd);let s=t.realpathSync();return e?s:s?.fullpath()}async walk(t=this.cwd,e={}){typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t,t=this.cwd);let{withFileTypes:s=true,follow:i=false,filter:r,walkFilter:o}=e,h=[];(!r||r(t))&&h.push(s?t:t.fullpath());let a=new Set,l=(c,d)=>{a.add(c),c.readdirCB((f,m)=>{if(f)return d(f);let p=m.length;if(!p)return d();let w=()=>{--p===0&&d();};for(let g of m)(!r||r(g))&&h.push(s?g:g.fullpath()),i&&g.isSymbolicLink()?g.realpath().then(S=>S?.isUnknown()?S.lstat():S).then(S=>S?.shouldWalk(a,o)?l(S,w):w()):g.shouldWalk(a,o)?l(g,w):w();},true);},u=t;return new Promise((c,d)=>{l(u,f=>{if(f)return d(f);c(h);});})}walkSync(t=this.cwd,e={}){typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t,t=this.cwd);let{withFileTypes:s=true,follow:i=false,filter:r,walkFilter:o}=e,h=[];(!r||r(t))&&h.push(s?t:t.fullpath());let a=new Set([t]);for(let l of a){let u=l.readdirSync();for(let c of u){(!r||r(c))&&h.push(s?c:c.fullpath());let d=c;if(c.isSymbolicLink()){if(!(i&&(d=c.realpathSync())))continue;d.isUnknown()&&d.lstatSync();}d.shouldWalk(a,o)&&a.add(d);}}return h}[Symbol.asyncIterator](){return this.iterate()}iterate(t=this.cwd,e={}){return typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t,t=this.cwd),this.stream(t,e)[Symbol.asyncIterator]()}[Symbol.iterator](){return this.iterateSync()}*iterateSync(t=this.cwd,e={}){typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t,t=this.cwd);let{withFileTypes:s=true,follow:i=false,filter:r,walkFilter:o}=e;(!r||r(t))&&(yield s?t:t.fullpath());let h=new Set([t]);for(let a of h){let l=a.readdirSync();for(let u of l){(!r||r(u))&&(yield s?u:u.fullpath());let c=u;if(u.isSymbolicLink()){if(!(i&&(c=u.realpathSync())))continue;c.isUnknown()&&c.lstatSync();}c.shouldWalk(h,o)&&h.add(c);}}}stream(t=this.cwd,e={}){typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t,t=this.cwd);let{withFileTypes:s=true,follow:i=false,filter:r,walkFilter:o}=e,h=new V({objectMode:true});(!r||r(t))&&h.write(s?t:t.fullpath());let a=new Set,l=[t],u=0,c=()=>{let d=false;for(;!d;){let f=l.shift();if(!f){u===0&&h.end();return}u++,a.add(f);let m=(w,g,S=false)=>{if(w)return h.emit("error",w);if(i&&!S){let E=[];for(let y of g)y.isSymbolicLink()&&E.push(y.realpath().then(b=>b?.isUnknown()?b.lstat():b));if(E.length){Promise.all(E).then(()=>m(null,g,true));return}}for(let E of g)E&&(!r||r(E))&&(h.write(s?E:E.fullpath())||(d=true));u--;for(let E of g){let y=E.realpathCached()||E;y.shouldWalk(a,o)&&l.push(y);}d&&!h.flowing?h.once("drain",c):p||c();},p=true;f.readdirCB(m,true),p=false;}};return c(),h}streamSync(t=this.cwd,e={}){typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t,t=this.cwd);let{withFileTypes:s=true,follow:i=false,filter:r,walkFilter:o}=e,h=new V({objectMode:true}),a=new Set;(!r||r(t))&&h.write(s?t:t.fullpath());let l=[t],u=0,c=()=>{let d=false;for(;!d;){let f=l.shift();if(!f){u===0&&h.end();return}u++,a.add(f);let m=f.readdirSync();for(let p of m)(!r||r(p))&&(h.write(s?p:p.fullpath())||(d=true));u--;for(let p of m){let w=p;if(p.isSymbolicLink()){if(!(i&&(w=p.realpathSync())))continue;w.isUnknown()&&w.lstatSync();}w.shouldWalk(a,o)&&l.push(w);}}d&&!h.flowing&&h.once("drain",c);};return c(),h}chdir(t=this.cwd){let e=this.cwd;this.cwd=typeof t=="string"?this.cwd.resolve(t):t,this.cwd[Ye](e);}},it=class extends It{sep="\\";constructor(t=process.cwd(),e={}){let{nocase:s=true}=e;super(t,require$$1$5.win32,"\\",{...e,nocase:s}),this.nocase=s;for(let i=this.cwd;i;i=i.parent)i.nocase=this.nocase;}parseRootPath(t){return require$$1$5.win32.parse(t).root.toUpperCase()}newRoot(t){return new Pt(this.rootPath,U,void 0,this.roots,this.nocase,this.childrenCache(),{fs:t})}isAbsolute(t){return t.startsWith("/")||t.startsWith("\\")||/^[a-z]:(\/|\\)/i.test(t)}},rt=class extends It{sep="/";constructor(t=process.cwd(),e={}){let{nocase:s=false}=e;super(t,require$$1$5.posix,"/",{...e,nocase:s}),this.nocase=s;}parseRootPath(t){return "/"}newRoot(t){return new jt(this.rootPath,U,void 0,this.roots,this.nocase,this.childrenCache(),{fs:t})}isAbsolute(t){return t.startsWith("/")}},St=class extends rt{constructor(t=process.cwd(),e={}){let{nocase:s=true}=e;super(t,{...e,nocase:s});}};process.platform==="win32"?Pt:jt;var Xe=process.platform==="win32"?it:process.platform==="darwin"?St:rt;var Di=n=>n.length>=1,Mi=n=>n.length>=1,Ni=Symbol.for("nodejs.util.inspect.custom"),nt=class n{#t;#s;#n;length;#r;#o;#S;#w;#c;#h;#u=true;constructor(t,e,s,i){if(!Di(t))throw new TypeError("empty pattern list");if(!Mi(e))throw new TypeError("empty glob list");if(e.length!==t.length)throw new TypeError("mismatched pattern list and glob list lengths");if(this.length=t.length,s<0||s>=this.length)throw new TypeError("index out of range");if(this.#t=t,this.#s=e,this.#n=s,this.#r=i,this.#n===0){if(this.isUNC()){let[r,o,h,a,...l]=this.#t,[u,c,d,f,...m]=this.#s;l[0]===""&&(l.shift(),m.shift());let p=[r,o,h,a,""].join("/"),w=[u,c,d,f,""].join("/");this.#t=[p,...l],this.#s=[w,...m],this.length=this.#t.length;}else if(this.isDrive()||this.isAbsolute()){let[r,...o]=this.#t,[h,...a]=this.#s;o[0]===""&&(o.shift(),a.shift());let l=r+"/",u=h+"/";this.#t=[l,...o],this.#s=[u,...a],this.length=this.#t.length;}}}[Ni](){return "Pattern <"+this.#s.slice(this.#n).join("/")+">"}pattern(){return this.#t[this.#n]}isString(){return typeof this.#t[this.#n]=="string"}isGlobstar(){return this.#t[this.#n]===A}isRegExp(){return this.#t[this.#n]instanceof RegExp}globString(){return this.#S=this.#S||(this.#n===0?this.isAbsolute()?this.#s[0]+this.#s.slice(1).join("/"):this.#s.join("/"):this.#s.slice(this.#n).join("/"))}hasMore(){return this.length>this.#n+1}rest(){return this.#o!==void 0?this.#o:this.hasMore()?(this.#o=new n(this.#t,this.#s,this.#n+1,this.#r),this.#o.#h=this.#h,this.#o.#c=this.#c,this.#o.#w=this.#w,this.#o):this.#o=null}isUNC(){let t=this.#t;return this.#c!==void 0?this.#c:this.#c=this.#r==="win32"&&this.#n===0&&t[0]===""&&t[1]===""&&typeof t[2]=="string"&&!!t[2]&&typeof t[3]=="string"&&!!t[3]}isDrive(){let t=this.#t;return this.#w!==void 0?this.#w:this.#w=this.#r==="win32"&&this.#n===0&&this.length>1&&typeof t[0]=="string"&&/^[a-z]:$/i.test(t[0])}isAbsolute(){let t=this.#t;return this.#h!==void 0?this.#h:this.#h=t[0]===""&&t.length>1||this.isDrive()||this.isUNC()}root(){let t=this.#t[0];return typeof t=="string"&&this.isAbsolute()&&this.#n===0?t:""}checkFollowGlobstar(){return !(this.#n===0||!this.isGlobstar()||!this.#u)}markFollowGlobstar(){return this.#n===0||!this.isGlobstar()||!this.#u?false:(this.#u=false,true)}};var _i=typeof process=="object"&&process&&typeof process.platform=="string"?process.platform:"linux",ot=class{relative;relativeChildren;absolute;absoluteChildren;platform;mmopts;constructor(t,{nobrace:e,nocase:s,noext:i,noglobstar:r,platform:o=_i}){this.relative=[],this.absolute=[],this.relativeChildren=[],this.absoluteChildren=[],this.platform=o,this.mmopts={dot:true,nobrace:e,nocase:s,noext:i,noglobstar:r,optimizationLevel:2,platform:o,nocomment:true,nonegate:true};for(let h of t)this.add(h);}add(t){let e=new D(t,this.mmopts);for(let s=0;s<e.set.length;s++){let i=e.set[s],r=e.globParts[s];if(!i||!r)throw new Error("invalid pattern object");for(;i[0]==="."&&r[0]===".";)i.shift(),r.shift();let o=new nt(i,r,0,this.platform),h=new D(o.globString(),this.mmopts),a=r[r.length-1]==="**",l=o.isAbsolute();l?this.absolute.push(h):this.relative.push(h),a&&(l?this.absoluteChildren.push(h):this.relativeChildren.push(h));}}ignored(t){let e=t.fullpath(),s=`${e}/`,i=t.relative()||".",r=`${i}/`;for(let o of this.relative)if(o.match(i)||o.match(r))return  true;for(let o of this.absolute)if(o.match(e)||o.match(s))return  true;return  false}childrenIgnored(t){let e=t.fullpath()+"/",s=(t.relative()||".")+"/";for(let i of this.relativeChildren)if(i.match(s))return  true;for(let i of this.absoluteChildren)if(i.match(e))return  true;return  false}};var oe=class n{store;constructor(t=new Map){this.store=t;}copy(){return new n(new Map(this.store))}hasWalked(t,e){return this.store.get(t.fullpath())?.has(e.globString())}storeWalked(t,e){let s=t.fullpath(),i=this.store.get(s);i?i.add(e.globString()):this.store.set(s,new Set([e.globString()]));}},he=class{store=new Map;add(t,e,s){let i=(e?2:0)|(s?1:0),r=this.store.get(t);this.store.set(t,r===void 0?i:i&r);}entries(){return [...this.store.entries()].map(([t,e])=>[t,!!(e&2),!!(e&1)])}},ae=class{store=new Map;add(t,e){if(!t.canReaddir())return;let s=this.store.get(t);s?s.find(i=>i.globString()===e.globString())||s.push(e):this.store.set(t,[e]);}get(t){let e=this.store.get(t);if(!e)throw new Error("attempting to walk unknown path");return e}entries(){return this.keys().map(t=>[t,this.store.get(t)])}keys(){return [...this.store.keys()].filter(t=>t.canReaddir())}},Et=class n{hasWalkedCache;matches=new he;subwalks=new ae;patterns;follow;dot;opts;constructor(t,e){this.opts=t,this.follow=!!t.follow,this.dot=!!t.dot,this.hasWalkedCache=e?e.copy():new oe;}processPatterns(t,e){this.patterns=e;let s=e.map(i=>[t,i]);for(let[i,r]of s){this.hasWalkedCache.storeWalked(i,r);let o=r.root(),h=r.isAbsolute()&&this.opts.absolute!==false;if(o){i=i.resolve(o==="/"&&this.opts.root!==void 0?this.opts.root:o);let c=r.rest();if(c)r=c;else {this.matches.add(i,true,false);continue}}if(i.isENOENT())continue;let a,l,u=false;for(;typeof(a=r.pattern())=="string"&&(l=r.rest());)i=i.resolve(a),r=l,u=true;if(a=r.pattern(),l=r.rest(),u){if(this.hasWalkedCache.hasWalked(i,r))continue;this.hasWalkedCache.storeWalked(i,r);}if(typeof a=="string"){let c=a===".."||a===""||a===".";this.matches.add(i.resolve(a),h,c);continue}else if(a===A){(!i.isSymbolicLink()||this.follow||r.checkFollowGlobstar())&&this.subwalks.add(i,r);let c=l?.pattern(),d=l?.rest();if(!l||(c===""||c===".")&&!d)this.matches.add(i,h,c===""||c===".");else if(c===".."){let f=i.parent||i;d?this.hasWalkedCache.hasWalked(f,d)||this.subwalks.add(f,d):this.matches.add(f,h,true);}}else a instanceof RegExp&&this.subwalks.add(i,r);}return this}subwalkTargets(){return this.subwalks.keys()}child(){return new n(this.opts,this.hasWalkedCache)}filterEntries(t,e){let s=this.subwalks.get(t),i=this.child();for(let r of e)for(let o of s){let h=o.isAbsolute(),a=o.pattern(),l=o.rest();a===A?i.testGlobstar(r,o,l,h):a instanceof RegExp?i.testRegExp(r,a,l,h):i.testString(r,a,l,h);}return i}testGlobstar(t,e,s,i){if((this.dot||!t.name.startsWith("."))&&(e.hasMore()||this.matches.add(t,i,false),t.canReaddir()&&(this.follow||!t.isSymbolicLink()?this.subwalks.add(t,e):t.isSymbolicLink()&&(s&&e.checkFollowGlobstar()?this.subwalks.add(t,s):e.markFollowGlobstar()&&this.subwalks.add(t,e)))),s){let r=s.pattern();if(typeof r=="string"&&r!==".."&&r!==""&&r!==".")this.testString(t,r,s.rest(),i);else if(r===".."){let o=t.parent||t;this.subwalks.add(o,s);}else r instanceof RegExp&&this.testRegExp(t,r,s.rest(),i);}}testRegExp(t,e,s,i){e.test(t.name)&&(s?this.subwalks.add(t,s):this.matches.add(t,i,false));}testString(t,e,s,i){t.isNamed(e)&&(s?this.subwalks.add(t,s):this.matches.add(t,i,false));}};var Li=(n,t)=>typeof n=="string"?new ot([n],t):Array.isArray(n)?new ot(n,t):n,zt=class{path;patterns;opts;seen=new Set;paused=false;aborted=false;#t=[];#s;#n;signal;maxDepth;includeChildMatches;constructor(t,e,s){if(this.patterns=t,this.path=e,this.opts=s,this.#n=!s.posix&&s.platform==="win32"?"\\":"/",this.includeChildMatches=s.includeChildMatches!==false,(s.ignore||!this.includeChildMatches)&&(this.#s=Li(s.ignore??[],s),!this.includeChildMatches&&typeof this.#s.add!="function")){let i="cannot ignore child matches, ignore lacks add() method.";throw new Error(i)}this.maxDepth=s.maxDepth||1/0,s.signal&&(this.signal=s.signal,this.signal.addEventListener("abort",()=>{this.#t.length=0;}));}#r(t){return this.seen.has(t)||!!this.#s?.ignored?.(t)}#o(t){return !!this.#s?.childrenIgnored?.(t)}pause(){this.paused=true;}resume(){if(this.signal?.aborted)return;this.paused=false;let t;for(;!this.paused&&(t=this.#t.shift());)t();}onResume(t){this.signal?.aborted||(this.paused?this.#t.push(t):t());}async matchCheck(t,e){if(e&&this.opts.nodir)return;let s;if(this.opts.realpath){if(s=t.realpathCached()||await t.realpath(),!s)return;t=s;}let r=t.isUnknown()||this.opts.stat?await t.lstat():t;if(this.opts.follow&&this.opts.nodir&&r?.isSymbolicLink()){let o=await r.realpath();o&&(o.isUnknown()||this.opts.stat)&&await o.lstat();}return this.matchCheckTest(r,e)}matchCheckTest(t,e){return t&&(this.maxDepth===1/0||t.depth()<=this.maxDepth)&&(!e||t.canReaddir())&&(!this.opts.nodir||!t.isDirectory())&&(!this.opts.nodir||!this.opts.follow||!t.isSymbolicLink()||!t.realpathCached()?.isDirectory())&&!this.#r(t)?t:void 0}matchCheckSync(t,e){if(e&&this.opts.nodir)return;let s;if(this.opts.realpath){if(s=t.realpathCached()||t.realpathSync(),!s)return;t=s;}let r=t.isUnknown()||this.opts.stat?t.lstatSync():t;if(this.opts.follow&&this.opts.nodir&&r?.isSymbolicLink()){let o=r.realpathSync();o&&(o?.isUnknown()||this.opts.stat)&&o.lstatSync();}return this.matchCheckTest(r,e)}matchFinish(t,e){if(this.#r(t))return;if(!this.includeChildMatches&&this.#s?.add){let r=`${t.relativePosix()}/**`;this.#s.add(r);}let s=this.opts.absolute===void 0?e:this.opts.absolute;this.seen.add(t);let i=this.opts.mark&&t.isDirectory()?this.#n:"";if(this.opts.withFileTypes)this.matchEmit(t);else if(s){let r=this.opts.posix?t.fullpathPosix():t.fullpath();this.matchEmit(r+i);}else {let r=this.opts.posix?t.relativePosix():t.relative(),o=this.opts.dotRelative&&!r.startsWith(".."+this.#n)?"."+this.#n:"";this.matchEmit(r?o+r+i:"."+i);}}async match(t,e,s){let i=await this.matchCheck(t,s);i&&this.matchFinish(i,e);}matchSync(t,e,s){let i=this.matchCheckSync(t,s);i&&this.matchFinish(i,e);}walkCB(t,e,s){this.signal?.aborted&&s(),this.walkCB2(t,e,new Et(this.opts),s);}walkCB2(t,e,s,i){if(this.#o(t))return i();if(this.signal?.aborted&&i(),this.paused){this.onResume(()=>this.walkCB2(t,e,s,i));return}s.processPatterns(t,e);let r=1,o=()=>{--r===0&&i();};for(let[h,a,l]of s.matches.entries())this.#r(h)||(r++,this.match(h,a,l).then(()=>o()));for(let h of s.subwalkTargets()){if(this.maxDepth!==1/0&&h.depth()>=this.maxDepth)continue;r++;let a=h.readdirCached();h.calledReaddir()?this.walkCB3(h,a,s,o):h.readdirCB((l,u)=>this.walkCB3(h,u,s,o),true);}o();}walkCB3(t,e,s,i){s=s.filterEntries(t,e);let r=1,o=()=>{--r===0&&i();};for(let[h,a,l]of s.matches.entries())this.#r(h)||(r++,this.match(h,a,l).then(()=>o()));for(let[h,a]of s.subwalks.entries())r++,this.walkCB2(h,a,s.child(),o);o();}walkCBSync(t,e,s){this.signal?.aborted&&s(),this.walkCB2Sync(t,e,new Et(this.opts),s);}walkCB2Sync(t,e,s,i){if(this.#o(t))return i();if(this.signal?.aborted&&i(),this.paused){this.onResume(()=>this.walkCB2Sync(t,e,s,i));return}s.processPatterns(t,e);let r=1,o=()=>{--r===0&&i();};for(let[h,a,l]of s.matches.entries())this.#r(h)||this.matchSync(h,a,l);for(let h of s.subwalkTargets()){if(this.maxDepth!==1/0&&h.depth()>=this.maxDepth)continue;r++;let a=h.readdirSync();this.walkCB3Sync(h,a,s,o);}o();}walkCB3Sync(t,e,s,i){s=s.filterEntries(t,e);let r=1,o=()=>{--r===0&&i();};for(let[h,a,l]of s.matches.entries())this.#r(h)||this.matchSync(h,a,l);for(let[h,a]of s.subwalks.entries())r++,this.walkCB2Sync(h,a,s.child(),o);o();}},xt=class extends zt{matches=new Set;constructor(t,e,s){super(t,e,s);}matchEmit(t){this.matches.add(t);}async walk(){if(this.signal?.aborted)throw this.signal.reason;return this.path.isUnknown()&&await this.path.lstat(),await new Promise((t,e)=>{this.walkCB(this.path,this.patterns,()=>{this.signal?.aborted?e(this.signal.reason):t(this.matches);});}),this.matches}walkSync(){if(this.signal?.aborted)throw this.signal.reason;return this.path.isUnknown()&&this.path.lstatSync(),this.walkCBSync(this.path,this.patterns,()=>{if(this.signal?.aborted)throw this.signal.reason}),this.matches}},vt=class extends zt{results;constructor(t,e,s){super(t,e,s),this.results=new V({signal:this.signal,objectMode:true}),this.results.on("drain",()=>this.resume()),this.results.on("resume",()=>this.resume());}matchEmit(t){this.results.write(t),this.results.flowing||this.pause();}stream(){let t=this.path;return t.isUnknown()?t.lstat().then(()=>{this.walkCB(t,this.patterns,()=>this.results.end());}):this.walkCB(t,this.patterns,()=>this.results.end()),this.results}streamSync(){return this.path.isUnknown()&&this.path.lstatSync(),this.walkCBSync(this.path,this.patterns,()=>this.results.end()),this.results}};var Pi=typeof process=="object"&&process&&typeof process.platform=="string"?process.platform:"linux",I=class{absolute;cwd;root;dot;dotRelative;follow;ignore;magicalBraces;mark;matchBase;maxDepth;nobrace;nocase;nodir;noext;noglobstar;pattern;platform;realpath;scurry;stat;signal;windowsPathsNoEscape;withFileTypes;includeChildMatches;opts;patterns;constructor(t,e){if(!e)throw new TypeError("glob options required");if(this.withFileTypes=!!e.withFileTypes,this.signal=e.signal,this.follow=!!e.follow,this.dot=!!e.dot,this.dotRelative=!!e.dotRelative,this.nodir=!!e.nodir,this.mark=!!e.mark,e.cwd?(e.cwd instanceof URL||e.cwd.startsWith("file://"))&&(e.cwd=require$$1$2.fileURLToPath(e.cwd)):this.cwd="",this.cwd=e.cwd||"",this.root=e.root,this.magicalBraces=!!e.magicalBraces,this.nobrace=!!e.nobrace,this.noext=!!e.noext,this.realpath=!!e.realpath,this.absolute=e.absolute,this.includeChildMatches=e.includeChildMatches!==false,this.noglobstar=!!e.noglobstar,this.matchBase=!!e.matchBase,this.maxDepth=typeof e.maxDepth=="number"?e.maxDepth:1/0,this.stat=!!e.stat,this.ignore=e.ignore,this.withFileTypes&&this.absolute!==void 0)throw new Error("cannot set absolute and withFileTypes:true");if(typeof t=="string"&&(t=[t]),this.windowsPathsNoEscape=!!e.windowsPathsNoEscape||e.allowWindowsEscape===false,this.windowsPathsNoEscape&&(t=t.map(a=>a.replace(/\\/g,"/"))),this.matchBase){if(e.noglobstar)throw new TypeError("base matching requires globstar");t=t.map(a=>a.includes("/")?a:`./**/${a}`);}if(this.pattern=t,this.platform=e.platform||Pi,this.opts={...e,platform:this.platform},e.scurry){if(this.scurry=e.scurry,e.nocase!==void 0&&e.nocase!==e.scurry.nocase)throw new Error("nocase option contradicts provided scurry option")}else {let a=e.platform==="win32"?it:e.platform==="darwin"?St:e.platform?rt:Xe;this.scurry=new a(this.cwd,{nocase:e.nocase,fs:e.fs});}this.nocase=this.scurry.nocase;let s=this.platform==="darwin"||this.platform==="win32",i={braceExpandMax:1e4,...e,dot:this.dot,matchBase:this.matchBase,nobrace:this.nobrace,nocase:this.nocase,nocaseMagicOnly:s,nocomment:true,noext:this.noext,nonegate:true,optimizationLevel:2,platform:this.platform,windowsPathsNoEscape:this.windowsPathsNoEscape,debug:!!this.opts.debug},r=this.pattern.map(a=>new D(a,i)),[o,h]=r.reduce((a,l)=>(a[0].push(...l.set),a[1].push(...l.globParts),a),[[],[]]);this.patterns=o.map((a,l)=>{let u=h[l];if(!u)throw new Error("invalid pattern object");return new nt(a,u,0,this.platform)});}async walk(){return [...await new xt(this.patterns,this.scurry.cwd,{...this.opts,maxDepth:this.maxDepth!==1/0?this.maxDepth+this.scurry.cwd.depth():1/0,platform:this.platform,nocase:this.nocase,includeChildMatches:this.includeChildMatches}).walk()]}walkSync(){return [...new xt(this.patterns,this.scurry.cwd,{...this.opts,maxDepth:this.maxDepth!==1/0?this.maxDepth+this.scurry.cwd.depth():1/0,platform:this.platform,nocase:this.nocase,includeChildMatches:this.includeChildMatches}).walkSync()]}stream(){return new vt(this.patterns,this.scurry.cwd,{...this.opts,maxDepth:this.maxDepth!==1/0?this.maxDepth+this.scurry.cwd.depth():1/0,platform:this.platform,nocase:this.nocase,includeChildMatches:this.includeChildMatches}).stream()}streamSync(){return new vt(this.patterns,this.scurry.cwd,{...this.opts,maxDepth:this.maxDepth!==1/0?this.maxDepth+this.scurry.cwd.depth():1/0,platform:this.platform,nocase:this.nocase,includeChildMatches:this.includeChildMatches}).streamSync()}iterateSync(){return this.streamSync()[Symbol.iterator]()}[Symbol.iterator](){return this.iterateSync()}iterate(){return this.stream()[Symbol.asyncIterator]()}[Symbol.asyncIterator](){return this.iterate()}};var le=(n,t={})=>{Array.isArray(n)||(n=[n]);for(let e of n)if(new D(e,t).hasMagic())return  true;return  false};function Bt(n,t={}){return new I(n,t).streamSync()}function Qe(n,t={}){return new I(n,t).stream()}function ts(n,t={}){return new I(n,t).walkSync()}async function Je(n,t={}){return new I(n,t).walk()}function Ut(n,t={}){return new I(n,t).iterateSync()}function es(n,t={}){return new I(n,t).iterate()}var ji=Bt,Ii=Object.assign(Qe,{sync:Bt}),zi=Ut,Bi=Object.assign(es,{sync:Ut}),Ui=Object.assign(ts,{stream:Bt,iterate:Ut}),Ze=Object.assign(Je,{glob:Je,globSync:ts,sync:Ui,globStream:Qe,stream:Ii,globStreamSync:Bt,streamSync:ji,globIterate:es,iterate:Bi,globIterateSync:Ut,iterateSync:zi,Glob:I,hasMagic:le,escape:tt,unescape:W});Ze.glob=Ze;
+>>> no match, partial?`,t,d,e,f),d===a))}let p;if(typeof u=="string"?(p=c===u,this.debug("string match",u,c,p)):(p=u.test(c),this.debug("pattern match",u,c,p)),!p)return  false}if(o===a&&h===l)return  true;if(o===a)return s;if(h===l)return o===a-1&&t[o]==="";throw new Error("wtf?")}braceExpand(){return ke(this.pattern,this.options)}parse(t){at(t);let e=this.options;if(t==="**")return A;if(t==="")return "";let s,i=null;(s=t.match(js))?i=e.dot?zs:Is:(s=t.match(Rs))?i=(e.nocase?e.dot?Ms:Ds:e.dot?Fs:Os)(s[1]):(s=t.match(Bs))?i=(e.nocase?e.dot?$s:Us:e.dot?Gs:Hs)(s):(s=t.match(Ns))?i=e.dot?Ls:_s:(s=t.match(Ws))&&(i=Ps);let r=Q.fromGlob(t,this.options).toMMPattern();return i&&typeof r=="object"&&Reflect.defineProperty(r,"test",{value:i}),r}makeRe(){if(this.regexp||this.regexp===false)return this.regexp;let t=this.set;if(!t.length)return this.regexp=false,this.regexp;let e=this.options,s=e.noglobstar?Vs:e.dot?Ys:Xs,i=new Set(e.nocase?["i"]:[]),r=t.map(a=>{let l=a.map(c=>{if(c instanceof RegExp)for(let d of c.flags.split(""))i.add(d);return typeof c=="string"?ei(c):c===A?A:c._src});l.forEach((c,d)=>{let f=l[d+1],m=l[d-1];c!==A||m===A||(m===void 0?f!==void 0&&f!==A?l[d+1]="(?:\\/|"+s+"\\/)?"+f:l[d]=s:f===void 0?l[d-1]=m+"(?:\\/|\\/"+s+")?":f!==A&&(l[d-1]=m+"(?:\\/|\\/"+s+"\\/)"+f,l[d+1]=A));});let u=l.filter(c=>c!==A);if(this.partial&&u.length>=1){let c=[];for(let d=1;d<=u.length;d++)c.push(u.slice(0,d).join("/"));return "(?:"+c.join("|")+")"}return u.join("/")}).join("|"),[o,h]=t.length>1?["(?:",")"]:["",""];r="^"+o+r+h+"$",this.partial&&(r="^(?:\\/|"+o+r.slice(1,-1)+h+")$"),this.negate&&(r="^(?!"+r+").+$");try{this.regexp=new RegExp(r,[...i].join(""));}catch{this.regexp=false;}return this.regexp}slashSplit(t){return this.preserveMultipleSlashes?t.split("/"):this.isWindows&&/^\/\/[^\/]+/.test(t)?["",...t.split(/\/+/)]:t.split(/\/+/)}match(t,e=this.partial){if(this.debug("match",t,this.pattern),this.comment)return  false;if(this.empty)return t==="";if(t==="/"&&e)return  true;let s=this.options;this.isWindows&&(t=t.split("\\").join("/"));let i=this.slashSplit(t);this.debug(this.pattern,"split",i);let r=this.set;this.debug(this.pattern,"set",r);let o=i[i.length-1];if(!o)for(let h=i.length-2;!o&&h>=0;h--)o=i[h];for(let h=0;h<r.length;h++){let a=r[h],l=i;if(s.matchBase&&a.length===1&&(l=[o]),this.matchOne(l,a,e))return s.flipNegate?true:!this.negate}return s.flipNegate?false:this.negate}static defaults(t){return O.defaults(t).Minimatch}};O.AST=Q;O.Minimatch=D;O.escape=tt;O.unescape=W;var si=typeof performance=="object"&&performance&&typeof performance.now=="function"?performance:Date,Oe=new Set,Vt=typeof process=="object"&&process?process:{},Fe=(n,t,e,s)=>{typeof Vt.emitWarning=="function"?Vt.emitWarning(n,t,e,s):console.error(`[${e}] ${t}: ${n}`);},At=globalThis.AbortController,Re=globalThis.AbortSignal;if(typeof At>"u"){Re=class{onabort;_onabort=[];reason;aborted=false;addEventListener(e,s){this._onabort.push(s);}},At=class{constructor(){t();}signal=new Re;abort(e){if(!this.signal.aborted){this.signal.reason=e,this.signal.aborted=true;for(let s of this.signal._onabort)s(e);this.signal.onabort?.(e);}}};let n=Vt.env?.LRU_CACHE_IGNORE_AC_WARNING!=="1",t=()=>{n&&(n=false,Fe("AbortController is not defined. If using lru-cache in node 14, load an AbortController polyfill from the `node-abort-controller` package. A minimal polyfill is provided for use by LRUCache.fetch(), but it should not be relied upon in other contexts (eg, passing it to other APIs that use AbortController/AbortSignal might have undesirable effects). You may disable this with LRU_CACHE_IGNORE_AC_WARNING=1 in the env.","NO_ABORT_CONTROLLER","ENOTSUP",t));};}var ii=n=>!Oe.has(n);var q=n=>n&&n===Math.floor(n)&&n>0&&isFinite(n),De=n=>q(n)?n<=Math.pow(2,8)?Uint8Array:n<=Math.pow(2,16)?Uint16Array:n<=Math.pow(2,32)?Uint32Array:n<=Number.MAX_SAFE_INTEGER?Tt:null:null,Tt=class extends Array{constructor(n){super(n),this.fill(0);}},ri=class ct{heap;length;static#t=false;static create(t){let e=De(t);if(!e)return [];ct.#t=true;let s=new ct(t,e);return ct.#t=false,s}constructor(t,e){if(!ct.#t)throw new TypeError("instantiate Stack using Stack.create(n)");this.heap=new e(t),this.length=0;}push(t){this.heap[this.length++]=t;}pop(){return this.heap[--this.length]}},ft=class Me{#t;#s;#n;#r;#o;#S;#w;#c;get perf(){return this.#c}ttl;ttlResolution;ttlAutopurge;updateAgeOnGet;updateAgeOnHas;allowStale;noDisposeOnSet;noUpdateTTL;maxEntrySize;sizeCalculation;noDeleteOnFetchRejection;noDeleteOnStaleGet;allowStaleOnFetchAbort;allowStaleOnFetchRejection;ignoreFetchAbort;#h;#u;#f;#a;#i;#d;#E;#b;#p;#R;#m;#C;#T;#g;#y;#x;#A;#e;#_;static unsafeExposeInternals(t){return {starts:t.#T,ttls:t.#g,autopurgeTimers:t.#y,sizes:t.#C,keyMap:t.#f,keyList:t.#a,valList:t.#i,next:t.#d,prev:t.#E,get head(){return t.#b},get tail(){return t.#p},free:t.#R,isBackgroundFetch:e=>t.#l(e),backgroundFetch:(e,s,i,r)=>t.#U(e,s,i,r),moveToTail:e=>t.#W(e),indexes:e=>t.#F(e),rindexes:e=>t.#D(e),isStale:e=>t.#v(e)}}get max(){return this.#t}get maxSize(){return this.#s}get calculatedSize(){return this.#u}get size(){return this.#h}get fetchMethod(){return this.#S}get memoMethod(){return this.#w}get dispose(){return this.#n}get onInsert(){return this.#r}get disposeAfter(){return this.#o}constructor(t){let{max:e=0,ttl:s,ttlResolution:i=1,ttlAutopurge:r,updateAgeOnGet:o,updateAgeOnHas:h,allowStale:a,dispose:l,onInsert:u,disposeAfter:c,noDisposeOnSet:d,noUpdateTTL:f,maxSize:m=0,maxEntrySize:p=0,sizeCalculation:w,fetchMethod:g,memoMethod:S,noDeleteOnFetchRejection:E,noDeleteOnStaleGet:y,allowStaleOnFetchRejection:b,allowStaleOnFetchAbort:z,ignoreFetchAbort:$,perf:J}=t;if(J!==void 0&&typeof J?.now!="function")throw new TypeError("perf option must have a now() method if specified");if(this.#c=J??si,e!==0&&!q(e))throw new TypeError("max option must be a nonnegative integer");let Z=e?De(e):Array;if(!Z)throw new Error("invalid max value: "+e);if(this.#t=e,this.#s=m,this.maxEntrySize=p||this.#s,this.sizeCalculation=w,this.sizeCalculation){if(!this.#s&&!this.maxEntrySize)throw new TypeError("cannot set sizeCalculation without setting maxSize or maxEntrySize");if(typeof this.sizeCalculation!="function")throw new TypeError("sizeCalculation set to non-function")}if(S!==void 0&&typeof S!="function")throw new TypeError("memoMethod must be a function if defined");if(this.#w=S,g!==void 0&&typeof g!="function")throw new TypeError("fetchMethod must be a function if specified");if(this.#S=g,this.#A=!!g,this.#f=new Map,this.#a=new Array(e).fill(void 0),this.#i=new Array(e).fill(void 0),this.#d=new Z(e),this.#E=new Z(e),this.#b=0,this.#p=0,this.#R=ri.create(e),this.#h=0,this.#u=0,typeof l=="function"&&(this.#n=l),typeof u=="function"&&(this.#r=u),typeof c=="function"?(this.#o=c,this.#m=[]):(this.#o=void 0,this.#m=void 0),this.#x=!!this.#n,this.#_=!!this.#r,this.#e=!!this.#o,this.noDisposeOnSet=!!d,this.noUpdateTTL=!!f,this.noDeleteOnFetchRejection=!!E,this.allowStaleOnFetchRejection=!!b,this.allowStaleOnFetchAbort=!!z,this.ignoreFetchAbort=!!$,this.maxEntrySize!==0){if(this.#s!==0&&!q(this.#s))throw new TypeError("maxSize must be a positive integer if specified");if(!q(this.maxEntrySize))throw new TypeError("maxEntrySize must be a positive integer if specified");this.#G();}if(this.allowStale=!!a,this.noDeleteOnStaleGet=!!y,this.updateAgeOnGet=!!o,this.updateAgeOnHas=!!h,this.ttlResolution=q(i)||i===0?i:1,this.ttlAutopurge=!!r,this.ttl=s||0,this.ttl){if(!q(this.ttl))throw new TypeError("ttl must be a positive integer if specified");this.#M();}if(this.#t===0&&this.ttl===0&&this.#s===0)throw new TypeError("At least one of max, maxSize, or ttl is required");if(!this.ttlAutopurge&&!this.#t&&!this.#s){let $t="LRU_CACHE_UNBOUNDED";ii($t)&&(Oe.add($t),Fe("TTL caching without ttlAutopurge, max, or maxSize can result in unbounded memory consumption.","UnboundedCacheWarning",$t,Me));}}getRemainingTTL(t){return this.#f.has(t)?1/0:0}#M(){let t=new Tt(this.#t),e=new Tt(this.#t);this.#g=t,this.#T=e;let s=this.ttlAutopurge?new Array(this.#t):void 0;this.#y=s,this.#j=(o,h,a=this.#c.now())=>{if(e[o]=h!==0?a:0,t[o]=h,s?.[o]&&(clearTimeout(s[o]),s[o]=void 0),h!==0&&s){let l=setTimeout(()=>{this.#v(o)&&this.#O(this.#a[o],"expire");},h+1);l.unref&&l.unref(),s[o]=l;}},this.#k=o=>{e[o]=t[o]!==0?this.#c.now():0;},this.#N=(o,h)=>{if(t[h]){let a=t[h],l=e[h];if(!a||!l)return;o.ttl=a,o.start=l,o.now=i||r();let u=o.now-l;o.remainingTTL=a-u;}};let i=0,r=()=>{let o=this.#c.now();if(this.ttlResolution>0){i=o;let h=setTimeout(()=>i=0,this.ttlResolution);h.unref&&h.unref();}return o};this.getRemainingTTL=o=>{let h=this.#f.get(o);if(h===void 0)return 0;let a=t[h],l=e[h];if(!a||!l)return 1/0;let u=(i||r())-l;return a-u},this.#v=o=>{let h=e[o],a=t[o];return !!a&&!!h&&(i||r())-h>a};}#k=()=>{};#N=()=>{};#j=()=>{};#v=()=>false;#G(){let t=new Tt(this.#t);this.#u=0,this.#C=t,this.#P=e=>{this.#u-=t[e],t[e]=0;},this.#I=(e,s,i,r)=>{if(this.#l(s))return 0;if(!q(i))if(r){if(typeof r!="function")throw new TypeError("sizeCalculation must be a function");if(i=r(s,e),!q(i))throw new TypeError("sizeCalculation return invalid (expect positive integer)")}else throw new TypeError("invalid size value (must be positive integer). When maxSize or maxEntrySize is used, sizeCalculation or size must be set.");return i},this.#L=(e,s,i)=>{if(t[e]=s,this.#s){let r=this.#s-t[e];for(;this.#u>r;)this.#B(true);}this.#u+=t[e],i&&(i.entrySize=s,i.totalCalculatedSize=this.#u);};}#P=t=>{};#L=(t,e,s)=>{};#I=(t,e,s,i)=>{if(s||i)throw new TypeError("cannot set size without setting maxSize or maxEntrySize on cache");return 0};*#F({allowStale:t=this.allowStale}={}){if(this.#h)for(let e=this.#p;!(!this.#z(e)||((t||!this.#v(e))&&(yield e),e===this.#b));)e=this.#E[e];}*#D({allowStale:t=this.allowStale}={}){if(this.#h)for(let e=this.#b;!(!this.#z(e)||((t||!this.#v(e))&&(yield e),e===this.#p));)e=this.#d[e];}#z(t){return t!==void 0&&this.#f.get(this.#a[t])===t}*entries(){for(let t of this.#F())this.#i[t]!==void 0&&this.#a[t]!==void 0&&!this.#l(this.#i[t])&&(yield [this.#a[t],this.#i[t]]);}*rentries(){for(let t of this.#D())this.#i[t]!==void 0&&this.#a[t]!==void 0&&!this.#l(this.#i[t])&&(yield [this.#a[t],this.#i[t]]);}*keys(){for(let t of this.#F()){let e=this.#a[t];e!==void 0&&!this.#l(this.#i[t])&&(yield e);}}*rkeys(){for(let t of this.#D()){let e=this.#a[t];e!==void 0&&!this.#l(this.#i[t])&&(yield e);}}*values(){for(let t of this.#F())this.#i[t]!==void 0&&!this.#l(this.#i[t])&&(yield this.#i[t]);}*rvalues(){for(let t of this.#D())this.#i[t]!==void 0&&!this.#l(this.#i[t])&&(yield this.#i[t]);}[Symbol.iterator](){return this.entries()}[Symbol.toStringTag]="LRUCache";find(t,e={}){for(let s of this.#F()){let i=this.#i[s],r=this.#l(i)?i.__staleWhileFetching:i;if(r!==void 0&&t(r,this.#a[s],this))return this.get(this.#a[s],e)}}forEach(t,e=this){for(let s of this.#F()){let i=this.#i[s],r=this.#l(i)?i.__staleWhileFetching:i;r!==void 0&&t.call(e,r,this.#a[s],this);}}rforEach(t,e=this){for(let s of this.#D()){let i=this.#i[s],r=this.#l(i)?i.__staleWhileFetching:i;r!==void 0&&t.call(e,r,this.#a[s],this);}}purgeStale(){let t=false;for(let e of this.#D({allowStale:true}))this.#v(e)&&(this.#O(this.#a[e],"expire"),t=true);return t}info(t){let e=this.#f.get(t);if(e===void 0)return;let s=this.#i[e],i=this.#l(s)?s.__staleWhileFetching:s;if(i===void 0)return;let r={value:i};if(this.#g&&this.#T){let o=this.#g[e],h=this.#T[e];if(o&&h){let a=o-(this.#c.now()-h);r.ttl=a,r.start=Date.now();}}return this.#C&&(r.size=this.#C[e]),r}dump(){let t=[];for(let e of this.#F({allowStale:true})){let s=this.#a[e],i=this.#i[e],r=this.#l(i)?i.__staleWhileFetching:i;if(r===void 0||s===void 0)continue;let o={value:r};if(this.#g&&this.#T){o.ttl=this.#g[e];let h=this.#c.now()-this.#T[e];o.start=Math.floor(Date.now()-h);}this.#C&&(o.size=this.#C[e]),t.unshift([s,o]);}return t}load(t){this.clear();for(let[e,s]of t){if(s.start){let i=Date.now()-s.start;s.start=this.#c.now()-i;}this.set(e,s.value,s);}}set(t,e,s={}){if(e===void 0)return this.delete(t),this;let{ttl:i=this.ttl,start:r,noDisposeOnSet:o=this.noDisposeOnSet,sizeCalculation:h=this.sizeCalculation,status:a}=s,{noUpdateTTL:l=this.noUpdateTTL}=s,u=this.#I(t,e,s.size||0,h);if(this.maxEntrySize&&u>this.maxEntrySize)return a&&(a.set="miss",a.maxEntrySizeExceeded=true),this.#O(t,"set"),this;let c=this.#h===0?void 0:this.#f.get(t);if(c===void 0)c=this.#h===0?this.#p:this.#R.length!==0?this.#R.pop():this.#h===this.#t?this.#B(false):this.#h,this.#a[c]=t,this.#i[c]=e,this.#f.set(t,c),this.#d[this.#p]=c,this.#E[c]=this.#p,this.#p=c,this.#h++,this.#L(c,u,a),a&&(a.set="add"),l=false,this.#_&&this.#r?.(e,t,"add");else {this.#W(c);let d=this.#i[c];if(e!==d){if(this.#A&&this.#l(d)){d.__abortController.abort(new Error("replaced"));let{__staleWhileFetching:f}=d;f!==void 0&&!o&&(this.#x&&this.#n?.(f,t,"set"),this.#e&&this.#m?.push([f,t,"set"]));}else o||(this.#x&&this.#n?.(d,t,"set"),this.#e&&this.#m?.push([d,t,"set"]));if(this.#P(c),this.#L(c,u,a),this.#i[c]=e,a){a.set="replace";let f=d&&this.#l(d)?d.__staleWhileFetching:d;f!==void 0&&(a.oldValue=f);}}else a&&(a.set="update");this.#_&&this.onInsert?.(e,t,e===d?"update":"replace");}if(i!==0&&!this.#g&&this.#M(),this.#g&&(l||this.#j(c,i,r),a&&this.#N(a,c)),!o&&this.#e&&this.#m){let d=this.#m,f;for(;f=d?.shift();)this.#o?.(...f);}return this}pop(){try{for(;this.#h;){let t=this.#i[this.#b];if(this.#B(!0),this.#l(t)){if(t.__staleWhileFetching)return t.__staleWhileFetching}else if(t!==void 0)return t}}finally{if(this.#e&&this.#m){let t=this.#m,e;for(;e=t?.shift();)this.#o?.(...e);}}}#B(t){let e=this.#b,s=this.#a[e],i=this.#i[e];return this.#A&&this.#l(i)?i.__abortController.abort(new Error("evicted")):(this.#x||this.#e)&&(this.#x&&this.#n?.(i,s,"evict"),this.#e&&this.#m?.push([i,s,"evict"])),this.#P(e),this.#y?.[e]&&(clearTimeout(this.#y[e]),this.#y[e]=void 0),t&&(this.#a[e]=void 0,this.#i[e]=void 0,this.#R.push(e)),this.#h===1?(this.#b=this.#p=0,this.#R.length=0):this.#b=this.#d[e],this.#f.delete(s),this.#h--,e}has(t,e={}){let{updateAgeOnHas:s=this.updateAgeOnHas,status:i}=e,r=this.#f.get(t);if(r!==void 0){let o=this.#i[r];if(this.#l(o)&&o.__staleWhileFetching===void 0)return  false;if(this.#v(r))i&&(i.has="stale",this.#N(i,r));else return s&&this.#k(r),i&&(i.has="hit",this.#N(i,r)),true}else i&&(i.has="miss");return  false}peek(t,e={}){let{allowStale:s=this.allowStale}=e,i=this.#f.get(t);if(i===void 0||!s&&this.#v(i))return;let r=this.#i[i];return this.#l(r)?r.__staleWhileFetching:r}#U(t,e,s,i){let r=e===void 0?void 0:this.#i[e];if(this.#l(r))return r;let o=new At,{signal:h}=s;h?.addEventListener("abort",()=>o.abort(h.reason),{signal:o.signal});let a={signal:o.signal,options:s,context:i},l=(p,w=false)=>{let{aborted:g}=o.signal,S=s.ignoreFetchAbort&&p!==void 0,E=s.ignoreFetchAbort||!!(s.allowStaleOnFetchAbort&&p!==void 0);if(s.status&&(g&&!w?(s.status.fetchAborted=true,s.status.fetchError=o.signal.reason,S&&(s.status.fetchAbortIgnored=true)):s.status.fetchResolved=true),g&&!S&&!w)return c(o.signal.reason,E);let y=f,b=this.#i[e];return (b===f||S&&w&&b===void 0)&&(p===void 0?y.__staleWhileFetching!==void 0?this.#i[e]=y.__staleWhileFetching:this.#O(t,"fetch"):(s.status&&(s.status.fetchUpdated=true),this.set(t,p,a.options))),p},u=p=>(s.status&&(s.status.fetchRejected=true,s.status.fetchError=p),c(p,false)),c=(p,w)=>{let{aborted:g}=o.signal,S=g&&s.allowStaleOnFetchAbort,E=S||s.allowStaleOnFetchRejection,y=E||s.noDeleteOnFetchRejection,b=f;if(this.#i[e]===f&&(!y||!w&&b.__staleWhileFetching===void 0?this.#O(t,"fetch"):S||(this.#i[e]=b.__staleWhileFetching)),E)return s.status&&b.__staleWhileFetching!==void 0&&(s.status.returnedStale=true),b.__staleWhileFetching;if(b.__returned===b)throw p},d=(p,w)=>{let g=this.#S?.(t,r,a);g&&g instanceof Promise&&g.then(S=>p(S===void 0?void 0:S),w),o.signal.addEventListener("abort",()=>{(!s.ignoreFetchAbort||s.allowStaleOnFetchAbort)&&(p(void 0),s.allowStaleOnFetchAbort&&(p=S=>l(S,true)));});};s.status&&(s.status.fetchDispatched=true);let f=new Promise(d).then(l,u),m=Object.assign(f,{__abortController:o,__staleWhileFetching:r,__returned:void 0});return e===void 0?(this.set(t,m,{...a.options,status:void 0}),e=this.#f.get(t)):this.#i[e]=m,m}#l(t){if(!this.#A)return  false;let e=t;return !!e&&e instanceof Promise&&e.hasOwnProperty("__staleWhileFetching")&&e.__abortController instanceof At}async fetch(t,e={}){let{allowStale:s=this.allowStale,updateAgeOnGet:i=this.updateAgeOnGet,noDeleteOnStaleGet:r=this.noDeleteOnStaleGet,ttl:o=this.ttl,noDisposeOnSet:h=this.noDisposeOnSet,size:a=0,sizeCalculation:l=this.sizeCalculation,noUpdateTTL:u=this.noUpdateTTL,noDeleteOnFetchRejection:c=this.noDeleteOnFetchRejection,allowStaleOnFetchRejection:d=this.allowStaleOnFetchRejection,ignoreFetchAbort:f=this.ignoreFetchAbort,allowStaleOnFetchAbort:m=this.allowStaleOnFetchAbort,context:p,forceRefresh:w=false,status:g,signal:S}=e;if(!this.#A)return g&&(g.fetch="get"),this.get(t,{allowStale:s,updateAgeOnGet:i,noDeleteOnStaleGet:r,status:g});let E={allowStale:s,updateAgeOnGet:i,noDeleteOnStaleGet:r,ttl:o,noDisposeOnSet:h,size:a,sizeCalculation:l,noUpdateTTL:u,noDeleteOnFetchRejection:c,allowStaleOnFetchRejection:d,allowStaleOnFetchAbort:m,ignoreFetchAbort:f,status:g,signal:S},y=this.#f.get(t);if(y===void 0){g&&(g.fetch="miss");let b=this.#U(t,y,E,p);return b.__returned=b}else {let b=this.#i[y];if(this.#l(b)){let Z=s&&b.__staleWhileFetching!==void 0;return g&&(g.fetch="inflight",Z&&(g.returnedStale=true)),Z?b.__staleWhileFetching:b.__returned=b}let z=this.#v(y);if(!w&&!z)return g&&(g.fetch="hit"),this.#W(y),i&&this.#k(y),g&&this.#N(g,y),b;let $=this.#U(t,y,E,p),J=$.__staleWhileFetching!==void 0&&s;return g&&(g.fetch=z?"stale":"refresh",J&&z&&(g.returnedStale=true)),J?$.__staleWhileFetching:$.__returned=$}}async forceFetch(t,e={}){let s=await this.fetch(t,e);if(s===void 0)throw new Error("fetch() returned undefined");return s}memo(t,e={}){let s=this.#w;if(!s)throw new Error("no memoMethod provided to constructor");let{context:i,forceRefresh:r,...o}=e,h=this.get(t,o);if(!r&&h!==void 0)return h;let a=s(t,h,{options:o,context:i});return this.set(t,a,o),a}get(t,e={}){let{allowStale:s=this.allowStale,updateAgeOnGet:i=this.updateAgeOnGet,noDeleteOnStaleGet:r=this.noDeleteOnStaleGet,status:o}=e,h=this.#f.get(t);if(h!==void 0){let a=this.#i[h],l=this.#l(a);return o&&this.#N(o,h),this.#v(h)?(o&&(o.get="stale"),l?(o&&s&&a.__staleWhileFetching!==void 0&&(o.returnedStale=true),s?a.__staleWhileFetching:void 0):(r||this.#O(t,"expire"),o&&s&&(o.returnedStale=true),s?a:void 0)):(o&&(o.get="hit"),l?a.__staleWhileFetching:(this.#W(h),i&&this.#k(h),a))}else o&&(o.get="miss");}#$(t,e){this.#E[e]=t,this.#d[t]=e;}#W(t){t!==this.#p&&(t===this.#b?this.#b=this.#d[t]:this.#$(this.#E[t],this.#d[t]),this.#$(this.#p,t),this.#p=t);}delete(t){return this.#O(t,"delete")}#O(t,e){let s=false;if(this.#h!==0){let i=this.#f.get(t);if(i!==void 0)if(this.#y?.[i]&&(clearTimeout(this.#y?.[i]),this.#y[i]=void 0),s=true,this.#h===1)this.#H(e);else {this.#P(i);let r=this.#i[i];if(this.#l(r)?r.__abortController.abort(new Error("deleted")):(this.#x||this.#e)&&(this.#x&&this.#n?.(r,t,e),this.#e&&this.#m?.push([r,t,e])),this.#f.delete(t),this.#a[i]=void 0,this.#i[i]=void 0,i===this.#p)this.#p=this.#E[i];else if(i===this.#b)this.#b=this.#d[i];else {let o=this.#E[i];this.#d[o]=this.#d[i];let h=this.#d[i];this.#E[h]=this.#E[i];}this.#h--,this.#R.push(i);}}if(this.#e&&this.#m?.length){let i=this.#m,r;for(;r=i?.shift();)this.#o?.(...r);}return s}clear(){return this.#H("delete")}#H(t){for(let e of this.#D({allowStale:true})){let s=this.#i[e];if(this.#l(s))s.__abortController.abort(new Error("deleted"));else {let i=this.#a[e];this.#x&&this.#n?.(s,i,t),this.#e&&this.#m?.push([s,i,t]);}}if(this.#f.clear(),this.#i.fill(void 0),this.#a.fill(void 0),this.#g&&this.#T){this.#g.fill(0),this.#T.fill(0);for(let e of this.#y??[])e!==void 0&&clearTimeout(e);this.#y?.fill(void 0);}if(this.#C&&this.#C.fill(0),this.#b=0,this.#p=0,this.#R.length=0,this.#u=0,this.#h=0,this.#e&&this.#m){let e=this.#m,s;for(;s=e?.shift();)this.#o?.(...s);}}};var Ne=typeof process=="object"&&process?process:{stdout:null,stderr:null},oi=n=>!!n&&typeof n=="object"&&(n instanceof V||n instanceof require$$0$2||hi(n)||ai(n)),hi=n=>!!n&&typeof n=="object"&&n instanceof require$$0.EventEmitter&&typeof n.pipe=="function"&&n.pipe!==require$$0$2.Writable.prototype.pipe,ai=n=>!!n&&typeof n=="object"&&n instanceof require$$0.EventEmitter&&typeof n.write=="function"&&typeof n.end=="function",G=Symbol("EOF"),H=Symbol("maybeEmitEnd"),K=Symbol("emittedEnd"),kt=Symbol("emittingEnd"),ut=Symbol("emittedError"),Rt=Symbol("closed"),_e=Symbol("read"),Ot=Symbol("flush"),Le=Symbol("flushChunk"),P=Symbol("encoding"),et=Symbol("decoder"),v=Symbol("flowing"),dt=Symbol("paused"),st=Symbol("resume"),C=Symbol("buffer"),F=Symbol("pipes"),T=Symbol("bufferLength"),Yt=Symbol("bufferPush"),Ft=Symbol("bufferShift"),k=Symbol("objectMode"),x=Symbol("destroyed"),Xt=Symbol("error"),Jt=Symbol("emitData"),We=Symbol("emitEnd"),Zt=Symbol("emitEnd2"),B=Symbol("async"),Qt=Symbol("abort"),Dt=Symbol("aborted"),pt=Symbol("signal"),Y=Symbol("dataListeners"),M=Symbol("discarded"),mt=n=>Promise.resolve().then(n),li=n=>n(),ci=n=>n==="end"||n==="finish"||n==="prefinish",fi=n=>n instanceof ArrayBuffer||!!n&&typeof n=="object"&&n.constructor&&n.constructor.name==="ArrayBuffer"&&n.byteLength>=0,ui=n=>!Buffer.isBuffer(n)&&ArrayBuffer.isView(n),Mt=class{src;dest;opts;ondrain;constructor(t,e,s){this.src=t,this.dest=e,this.opts=s,this.ondrain=()=>t[st](),this.dest.on("drain",this.ondrain);}unpipe(){this.dest.removeListener("drain",this.ondrain);}proxyErrors(t){}end(){this.unpipe(),this.opts.end&&this.dest.end();}},te=class extends Mt{unpipe(){this.src.removeListener("error",this.proxyErrors),super.unpipe();}constructor(t,e,s){super(t,e,s),this.proxyErrors=i=>this.dest.emit("error",i),t.on("error",this.proxyErrors);}},di=n=>!!n.objectMode,pi=n=>!n.objectMode&&!!n.encoding&&n.encoding!=="buffer",V=class extends require$$0.EventEmitter{[v]=false;[dt]=false;[F]=[];[C]=[];[k];[P];[B];[et];[G]=false;[K]=false;[kt]=false;[Rt]=false;[ut]=null;[T]=0;[x]=false;[pt];[Dt]=false;[Y]=0;[M]=false;writable=true;readable=true;constructor(...t){let e=t[0]||{};if(super(),e.objectMode&&typeof e.encoding=="string")throw new TypeError("Encoding and objectMode may not be used together");di(e)?(this[k]=true,this[P]=null):pi(e)?(this[P]=e.encoding,this[k]=false):(this[k]=false,this[P]=null),this[B]=!!e.async,this[et]=this[P]?new node_string_decoder.StringDecoder(this[P]):null,e&&e.debugExposeBuffer===true&&Object.defineProperty(this,"buffer",{get:()=>this[C]}),e&&e.debugExposePipes===true&&Object.defineProperty(this,"pipes",{get:()=>this[F]});let{signal:s}=e;s&&(this[pt]=s,s.aborted?this[Qt]():s.addEventListener("abort",()=>this[Qt]()));}get bufferLength(){return this[T]}get encoding(){return this[P]}set encoding(t){throw new Error("Encoding must be set at instantiation time")}setEncoding(t){throw new Error("Encoding must be set at instantiation time")}get objectMode(){return this[k]}set objectMode(t){throw new Error("objectMode must be set at instantiation time")}get async(){return this[B]}set async(t){this[B]=this[B]||!!t;}[Qt](){this[Dt]=true,this.emit("abort",this[pt]?.reason),this.destroy(this[pt]?.reason);}get aborted(){return this[Dt]}set aborted(t){}write(t,e,s){if(this[Dt])return  false;if(this[G])throw new Error("write after end");if(this[x])return this.emit("error",Object.assign(new Error("Cannot call write after a stream was destroyed"),{code:"ERR_STREAM_DESTROYED"})),true;typeof e=="function"&&(s=e,e="utf8"),e||(e="utf8");let i=this[B]?mt:li;if(!this[k]&&!Buffer.isBuffer(t)){if(ui(t))t=Buffer.from(t.buffer,t.byteOffset,t.byteLength);else if(fi(t))t=Buffer.from(t);else if(typeof t!="string")throw new Error("Non-contiguous data written to non-objectMode stream")}return this[k]?(this[v]&&this[T]!==0&&this[Ot](true),this[v]?this.emit("data",t):this[Yt](t),this[T]!==0&&this.emit("readable"),s&&i(s),this[v]):t.length?(typeof t=="string"&&!(e===this[P]&&!this[et]?.lastNeed)&&(t=Buffer.from(t,e)),Buffer.isBuffer(t)&&this[P]&&(t=this[et].write(t)),this[v]&&this[T]!==0&&this[Ot](true),this[v]?this.emit("data",t):this[Yt](t),this[T]!==0&&this.emit("readable"),s&&i(s),this[v]):(this[T]!==0&&this.emit("readable"),s&&i(s),this[v])}read(t){if(this[x])return null;if(this[M]=false,this[T]===0||t===0||t&&t>this[T])return this[H](),null;this[k]&&(t=null),this[C].length>1&&!this[k]&&(this[C]=[this[P]?this[C].join(""):Buffer.concat(this[C],this[T])]);let e=this[_e](t||null,this[C][0]);return this[H](),e}[_e](t,e){if(this[k])this[Ft]();else {let s=e;t===s.length||t===null?this[Ft]():typeof s=="string"?(this[C][0]=s.slice(t),e=s.slice(0,t),this[T]-=t):(this[C][0]=s.subarray(t),e=s.subarray(0,t),this[T]-=t);}return this.emit("data",e),!this[C].length&&!this[G]&&this.emit("drain"),e}end(t,e,s){return typeof t=="function"&&(s=t,t=void 0),typeof e=="function"&&(s=e,e="utf8"),t!==void 0&&this.write(t,e),s&&this.once("end",s),this[G]=true,this.writable=false,(this[v]||!this[dt])&&this[H](),this}[st](){this[x]||(!this[Y]&&!this[F].length&&(this[M]=true),this[dt]=false,this[v]=true,this.emit("resume"),this[C].length?this[Ot]():this[G]?this[H]():this.emit("drain"));}resume(){return this[st]()}pause(){this[v]=false,this[dt]=true,this[M]=false;}get destroyed(){return this[x]}get flowing(){return this[v]}get paused(){return this[dt]}[Yt](t){this[k]?this[T]+=1:this[T]+=t.length,this[C].push(t);}[Ft](){return this[k]?this[T]-=1:this[T]-=this[C][0].length,this[C].shift()}[Ot](t=false){do;while(this[Le](this[Ft]())&&this[C].length);!t&&!this[C].length&&!this[G]&&this.emit("drain");}[Le](t){return this.emit("data",t),this[v]}pipe(t,e){if(this[x])return t;this[M]=false;let s=this[K];return e=e||{},t===Ne.stdout||t===Ne.stderr?e.end=false:e.end=e.end!==false,e.proxyErrors=!!e.proxyErrors,s?e.end&&t.end():(this[F].push(e.proxyErrors?new te(this,t,e):new Mt(this,t,e)),this[B]?mt(()=>this[st]()):this[st]()),t}unpipe(t){let e=this[F].find(s=>s.dest===t);e&&(this[F].length===1?(this[v]&&this[Y]===0&&(this[v]=false),this[F]=[]):this[F].splice(this[F].indexOf(e),1),e.unpipe());}addListener(t,e){return this.on(t,e)}on(t,e){let s=super.on(t,e);if(t==="data")this[M]=false,this[Y]++,!this[F].length&&!this[v]&&this[st]();else if(t==="readable"&&this[T]!==0)super.emit("readable");else if(ci(t)&&this[K])super.emit(t),this.removeAllListeners(t);else if(t==="error"&&this[ut]){let i=e;this[B]?mt(()=>i.call(this,this[ut])):i.call(this,this[ut]);}return s}removeListener(t,e){return this.off(t,e)}off(t,e){let s=super.off(t,e);return t==="data"&&(this[Y]=this.listeners("data").length,this[Y]===0&&!this[M]&&!this[F].length&&(this[v]=false)),s}removeAllListeners(t){let e=super.removeAllListeners(t);return (t==="data"||t===void 0)&&(this[Y]=0,!this[M]&&!this[F].length&&(this[v]=false)),e}get emittedEnd(){return this[K]}[H](){!this[kt]&&!this[K]&&!this[x]&&this[C].length===0&&this[G]&&(this[kt]=true,this.emit("end"),this.emit("prefinish"),this.emit("finish"),this[Rt]&&this.emit("close"),this[kt]=false);}emit(t,...e){let s=e[0];if(t!=="error"&&t!=="close"&&t!==x&&this[x])return  false;if(t==="data")return !this[k]&&!s?false:this[B]?(mt(()=>this[Jt](s)),true):this[Jt](s);if(t==="end")return this[We]();if(t==="close"){if(this[Rt]=true,!this[K]&&!this[x])return  false;let r=super.emit("close");return this.removeAllListeners("close"),r}else if(t==="error"){this[ut]=s,super.emit(Xt,s);let r=!this[pt]||this.listeners("error").length?super.emit("error",s):false;return this[H](),r}else if(t==="resume"){let r=super.emit("resume");return this[H](),r}else if(t==="finish"||t==="prefinish"){let r=super.emit(t);return this.removeAllListeners(t),r}let i=super.emit(t,...e);return this[H](),i}[Jt](t){for(let s of this[F])s.dest.write(t)===false&&this.pause();let e=this[M]?false:super.emit("data",t);return this[H](),e}[We](){return this[K]?false:(this[K]=true,this.readable=false,this[B]?(mt(()=>this[Zt]()),true):this[Zt]())}[Zt](){if(this[et]){let e=this[et].end();if(e){for(let s of this[F])s.dest.write(e);this[M]||super.emit("data",e);}}for(let e of this[F])e.end();let t=super.emit("end");return this.removeAllListeners("end"),t}async collect(){let t=Object.assign([],{dataLength:0});this[k]||(t.dataLength=0);let e=this.promise();return this.on("data",s=>{t.push(s),this[k]||(t.dataLength+=s.length);}),await e,t}async concat(){if(this[k])throw new Error("cannot concat in objectMode");let t=await this.collect();return this[P]?t.join(""):Buffer.concat(t,t.dataLength)}async promise(){return new Promise((t,e)=>{this.on(x,()=>e(new Error("stream destroyed"))),this.on("error",s=>e(s)),this.on("end",()=>t());})}[Symbol.asyncIterator](){this[M]=false;let t=false,e=async()=>(this.pause(),t=true,{value:void 0,done:true});return {next:()=>{if(t)return e();let i=this.read();if(i!==null)return Promise.resolve({done:false,value:i});if(this[G])return e();let r,o,h=c=>{this.off("data",a),this.off("end",l),this.off(x,u),e(),o(c);},a=c=>{this.off("error",h),this.off("end",l),this.off(x,u),this.pause(),r({value:c,done:!!this[G]});},l=()=>{this.off("error",h),this.off("data",a),this.off(x,u),e(),r({done:true,value:void 0});},u=()=>h(new Error("stream destroyed"));return new Promise((c,d)=>{o=d,r=c,this.once(x,u),this.once("error",h),this.once("end",l),this.once("data",a);})},throw:e,return:e,[Symbol.asyncIterator](){return this},[Symbol.asyncDispose]:async()=>{}}}[Symbol.iterator](){this[M]=false;let t=false,e=()=>(this.pause(),this.off(Xt,e),this.off(x,e),this.off("end",e),t=true,{done:true,value:void 0}),s=()=>{if(t)return e();let i=this.read();return i===null?e():{done:false,value:i}};return this.once("end",e),this.once(Xt,e),this.once(x,e),{next:s,throw:e,return:e,[Symbol.iterator](){return this},[Symbol.dispose]:()=>{}}}destroy(t){if(this[x])return t?this.emit("error",t):this.emit(x),this;this[x]=true,this[M]=true,this[C].length=0,this[T]=0;let e=this;return typeof e.close=="function"&&!this[Rt]&&e.close(),t?this.emit("error",t):this.emit(x),this}static get isStream(){return oi}};var vi=fs$1.realpathSync.native,wt={lstatSync:fs$1.lstatSync,readdir:fs$1.readdir,readdirSync:fs$1.readdirSync,readlinkSync:fs$1.readlinkSync,realpathSync:vi,promises:{lstat:require$$0$7.lstat,readdir:require$$0$7.readdir,readlink:require$$0$7.readlink,realpath:require$$0$7.realpath}},Ue=n=>!n||n===wt||n===xi__namespace?wt:{...wt,...n,promises:{...wt.promises,...n.promises||{}}},$e=/^\\\\\?\\([a-z]:)\\?$/i,Ri=n=>n.replace(/\//g,"\\").replace($e,"$1\\"),Oi=/[\\\/]/,L=0,Ge=1,He=2,U=4,qe=6,Ke=8,X=10,Ve=12,_=15,gt=~_,se=16,je=32,yt=64,j=128,Nt=256,Lt=512,Ie=yt|j|Lt,Fi=1023,ie=n=>n.isFile()?Ke:n.isDirectory()?U:n.isSymbolicLink()?X:n.isCharacterDevice()?He:n.isBlockDevice()?qe:n.isSocket()?Ve:n.isFIFO()?Ge:L,ze=new ft({max:2**12}),bt=n=>{let t=ze.get(n);if(t)return t;let e=n.normalize("NFKD");return ze.set(n,e),e},Be=new ft({max:2**12}),_t=n=>{let t=Be.get(n);if(t)return t;let e=bt(n.toLowerCase());return Be.set(n,e),e},Wt=class extends ft{constructor(){super({max:256});}},ne=class extends ft{constructor(t=16*1024){super({maxSize:t,sizeCalculation:e=>e.length+1});}},Ye=Symbol("PathScurry setAsCwd"),R=class{name;root;roots;parent;nocase;isCWD=false;#t;#s;get dev(){return this.#s}#n;get mode(){return this.#n}#r;get nlink(){return this.#r}#o;get uid(){return this.#o}#S;get gid(){return this.#S}#w;get rdev(){return this.#w}#c;get blksize(){return this.#c}#h;get ino(){return this.#h}#u;get size(){return this.#u}#f;get blocks(){return this.#f}#a;get atimeMs(){return this.#a}#i;get mtimeMs(){return this.#i}#d;get ctimeMs(){return this.#d}#E;get birthtimeMs(){return this.#E}#b;get atime(){return this.#b}#p;get mtime(){return this.#p}#R;get ctime(){return this.#R}#m;get birthtime(){return this.#m}#C;#T;#g;#y;#x;#A;#e;#_;#M;#k;get parentPath(){return (this.parent||this).fullpath()}get path(){return this.parentPath}constructor(t,e=L,s,i,r,o,h){this.name=t,this.#C=r?_t(t):bt(t),this.#e=e&Fi,this.nocase=r,this.roots=i,this.root=s||this,this.#_=o,this.#g=h.fullpath,this.#x=h.relative,this.#A=h.relativePosix,this.parent=h.parent,this.parent?this.#t=this.parent.#t:this.#t=Ue(h.fs);}depth(){return this.#T!==void 0?this.#T:this.parent?this.#T=this.parent.depth()+1:this.#T=0}childrenCache(){return this.#_}resolve(t){if(!t)return this;let e=this.getRootString(t),i=t.substring(e.length).split(this.splitSep);return e?this.getRoot(e).#N(i):this.#N(i)}#N(t){let e=this;for(let s of t)e=e.child(s);return e}children(){let t=this.#_.get(this);if(t)return t;let e=Object.assign([],{provisional:0});return this.#_.set(this,e),this.#e&=~se,e}child(t,e){if(t===""||t===".")return this;if(t==="..")return this.parent||this;let s=this.children(),i=this.nocase?_t(t):bt(t);for(let a of s)if(a.#C===i)return a;let r=this.parent?this.sep:"",o=this.#g?this.#g+r+t:void 0,h=this.newChild(t,L,{...e,parent:this,fullpath:o});return this.canReaddir()||(h.#e|=j),s.push(h),h}relative(){if(this.isCWD)return "";if(this.#x!==void 0)return this.#x;let t=this.name,e=this.parent;if(!e)return this.#x=this.name;let s=e.relative();return s+(!s||!e.parent?"":this.sep)+t}relativePosix(){if(this.sep==="/")return this.relative();if(this.isCWD)return "";if(this.#A!==void 0)return this.#A;let t=this.name,e=this.parent;if(!e)return this.#A=this.fullpathPosix();let s=e.relativePosix();return s+(!s||!e.parent?"":"/")+t}fullpath(){if(this.#g!==void 0)return this.#g;let t=this.name,e=this.parent;if(!e)return this.#g=this.name;let i=e.fullpath()+(e.parent?this.sep:"")+t;return this.#g=i}fullpathPosix(){if(this.#y!==void 0)return this.#y;if(this.sep==="/")return this.#y=this.fullpath();if(!this.parent){let i=this.fullpath().replace(/\\/g,"/");return /^[a-z]:\//i.test(i)?this.#y=`//?/${i}`:this.#y=i}let t=this.parent,e=t.fullpathPosix(),s=e+(!e||!t.parent?"":"/")+this.name;return this.#y=s}isUnknown(){return (this.#e&_)===L}isType(t){return this[`is${t}`]()}getType(){return this.isUnknown()?"Unknown":this.isDirectory()?"Directory":this.isFile()?"File":this.isSymbolicLink()?"SymbolicLink":this.isFIFO()?"FIFO":this.isCharacterDevice()?"CharacterDevice":this.isBlockDevice()?"BlockDevice":this.isSocket()?"Socket":"Unknown"}isFile(){return (this.#e&_)===Ke}isDirectory(){return (this.#e&_)===U}isCharacterDevice(){return (this.#e&_)===He}isBlockDevice(){return (this.#e&_)===qe}isFIFO(){return (this.#e&_)===Ge}isSocket(){return (this.#e&_)===Ve}isSymbolicLink(){return (this.#e&X)===X}lstatCached(){return this.#e&je?this:void 0}readlinkCached(){return this.#M}realpathCached(){return this.#k}readdirCached(){let t=this.children();return t.slice(0,t.provisional)}canReadlink(){if(this.#M)return  true;if(!this.parent)return  false;let t=this.#e&_;return !(t!==L&&t!==X||this.#e&Nt||this.#e&j)}calledReaddir(){return !!(this.#e&se)}isENOENT(){return !!(this.#e&j)}isNamed(t){return this.nocase?this.#C===_t(t):this.#C===bt(t)}async readlink(){let t=this.#M;if(t)return t;if(this.canReadlink()&&this.parent)try{let e=await this.#t.promises.readlink(this.fullpath()),s=(await this.parent.realpath())?.resolve(e);if(s)return this.#M=s}catch(e){this.#D(e.code);return}}readlinkSync(){let t=this.#M;if(t)return t;if(this.canReadlink()&&this.parent)try{let e=this.#t.readlinkSync(this.fullpath()),s=this.parent.realpathSync()?.resolve(e);if(s)return this.#M=s}catch(e){this.#D(e.code);return}}#j(t){this.#e|=se;for(let e=t.provisional;e<t.length;e++){let s=t[e];s&&s.#v();}}#v(){this.#e&j||(this.#e=(this.#e|j)&gt,this.#G());}#G(){let t=this.children();t.provisional=0;for(let e of t)e.#v();}#P(){this.#e|=Lt,this.#L();}#L(){if(this.#e&yt)return;let t=this.#e;(t&_)===U&&(t&=gt),this.#e=t|yt,this.#G();}#I(t=""){t==="ENOTDIR"||t==="EPERM"?this.#L():t==="ENOENT"?this.#v():this.children().provisional=0;}#F(t=""){t==="ENOTDIR"?this.parent.#L():t==="ENOENT"&&this.#v();}#D(t=""){let e=this.#e;e|=Nt,t==="ENOENT"&&(e|=j),(t==="EINVAL"||t==="UNKNOWN")&&(e&=gt),this.#e=e,t==="ENOTDIR"&&this.parent&&this.parent.#L();}#z(t,e){return this.#U(t,e)||this.#B(t,e)}#B(t,e){let s=ie(t),i=this.newChild(t.name,s,{parent:this}),r=i.#e&_;return r!==U&&r!==X&&r!==L&&(i.#e|=yt),e.unshift(i),e.provisional++,i}#U(t,e){for(let s=e.provisional;s<e.length;s++){let i=e[s];if((this.nocase?_t(t.name):bt(t.name))===i.#C)return this.#l(t,i,s,e)}}#l(t,e,s,i){let r=e.name;return e.#e=e.#e&gt|ie(t),r!==t.name&&(e.name=t.name),s!==i.provisional&&(s===i.length-1?i.pop():i.splice(s,1),i.unshift(e)),i.provisional++,e}async lstat(){if((this.#e&j)===0)try{return this.#$(await this.#t.promises.lstat(this.fullpath())),this}catch(t){this.#F(t.code);}}lstatSync(){if((this.#e&j)===0)try{return this.#$(this.#t.lstatSync(this.fullpath())),this}catch(t){this.#F(t.code);}}#$(t){let{atime:e,atimeMs:s,birthtime:i,birthtimeMs:r,blksize:o,blocks:h,ctime:a,ctimeMs:l,dev:u,gid:c,ino:d,mode:f,mtime:m,mtimeMs:p,nlink:w,rdev:g,size:S,uid:E}=t;this.#b=e,this.#a=s,this.#m=i,this.#E=r,this.#c=o,this.#f=h,this.#R=a,this.#d=l,this.#s=u,this.#S=c,this.#h=d,this.#n=f,this.#p=m,this.#i=p,this.#r=w,this.#w=g,this.#u=S,this.#o=E;let y=ie(t);this.#e=this.#e&gt|y|je,y!==L&&y!==U&&y!==X&&(this.#e|=yt);}#W=[];#O=false;#H(t){this.#O=false;let e=this.#W.slice();this.#W.length=0,e.forEach(s=>s(null,t));}readdirCB(t,e=false){if(!this.canReaddir()){e?t(null,[]):queueMicrotask(()=>t(null,[]));return}let s=this.children();if(this.calledReaddir()){let r=s.slice(0,s.provisional);e?t(null,r):queueMicrotask(()=>t(null,r));return}if(this.#W.push(t),this.#O)return;this.#O=true;let i=this.fullpath();this.#t.readdir(i,{withFileTypes:true},(r,o)=>{if(r)this.#I(r.code),s.provisional=0;else {for(let h of o)this.#z(h,s);this.#j(s);}this.#H(s.slice(0,s.provisional));});}#q;async readdir(){if(!this.canReaddir())return [];let t=this.children();if(this.calledReaddir())return t.slice(0,t.provisional);let e=this.fullpath();if(this.#q)await this.#q;else {let s=()=>{};this.#q=new Promise(i=>s=i);try{for(let i of await this.#t.promises.readdir(e,{withFileTypes:!0}))this.#z(i,t);this.#j(t);}catch(i){this.#I(i.code),t.provisional=0;}this.#q=void 0,s();}return t.slice(0,t.provisional)}readdirSync(){if(!this.canReaddir())return [];let t=this.children();if(this.calledReaddir())return t.slice(0,t.provisional);let e=this.fullpath();try{for(let s of this.#t.readdirSync(e,{withFileTypes:!0}))this.#z(s,t);this.#j(t);}catch(s){this.#I(s.code),t.provisional=0;}return t.slice(0,t.provisional)}canReaddir(){if(this.#e&Ie)return  false;let t=_&this.#e;return t===L||t===U||t===X}shouldWalk(t,e){return (this.#e&U)===U&&!(this.#e&Ie)&&!t.has(this)&&(!e||e(this))}async realpath(){if(this.#k)return this.#k;if(!((Lt|Nt|j)&this.#e))try{let t=await this.#t.promises.realpath(this.fullpath());return this.#k=this.resolve(t)}catch{this.#P();}}realpathSync(){if(this.#k)return this.#k;if(!((Lt|Nt|j)&this.#e))try{let t=this.#t.realpathSync(this.fullpath());return this.#k=this.resolve(t)}catch{this.#P();}}[Ye](t){if(t===this)return;t.isCWD=false,this.isCWD=true;let e=new Set([]),s=[],i=this;for(;i&&i.parent;)e.add(i),i.#x=s.join(this.sep),i.#A=s.join("/"),i=i.parent,s.push("..");for(i=t;i&&i.parent&&!e.has(i);)i.#x=void 0,i.#A=void 0,i=i.parent;}},Pt=class n extends R{sep="\\";splitSep=Oi;constructor(t,e=L,s,i,r,o,h){super(t,e,s,i,r,o,h);}newChild(t,e=L,s={}){return new n(t,e,this.root,this.roots,this.nocase,this.childrenCache(),s)}getRootString(t){return require$$1$5.win32.parse(t).root}getRoot(t){if(t=Ri(t.toUpperCase()),t===this.root.name)return this.root;for(let[e,s]of Object.entries(this.roots))if(this.sameRoot(t,e))return this.roots[t]=s;return this.roots[t]=new it(t,this).root}sameRoot(t,e=this.root.name){return t=t.toUpperCase().replace(/\//g,"\\").replace($e,"$1\\"),t===e}},jt=class n extends R{splitSep="/";sep="/";constructor(t,e=L,s,i,r,o,h){super(t,e,s,i,r,o,h);}getRootString(t){return t.startsWith("/")?"/":""}getRoot(t){return this.root}newChild(t,e=L,s={}){return new n(t,e,this.root,this.roots,this.nocase,this.childrenCache(),s)}},It=class{root;rootPath;roots;cwd;#t;#s;#n;nocase;#r;constructor(t=process.cwd(),e,s,{nocase:i,childrenCacheSize:r=16*1024,fs:o=wt}={}){this.#r=Ue(o),(t instanceof URL||t.startsWith("file://"))&&(t=require$$1$2.fileURLToPath(t));let h=e.resolve(t);this.roots=Object.create(null),this.rootPath=this.parseRootPath(h),this.#t=new Wt,this.#s=new Wt,this.#n=new ne(r);let a=h.substring(this.rootPath.length).split(s);if(a.length===1&&!a[0]&&a.pop(),i===void 0)throw new TypeError("must provide nocase setting to PathScurryBase ctor");this.nocase=i,this.root=this.newRoot(this.#r),this.roots[this.rootPath]=this.root;let l=this.root,u=a.length-1,c=e.sep,d=this.rootPath,f=false;for(let m of a){let p=u--;l=l.child(m,{relative:new Array(p).fill("..").join(c),relativePosix:new Array(p).fill("..").join("/"),fullpath:d+=(f?"":c)+m}),f=true;}this.cwd=l;}depth(t=this.cwd){return typeof t=="string"&&(t=this.cwd.resolve(t)),t.depth()}childrenCache(){return this.#n}resolve(...t){let e="";for(let r=t.length-1;r>=0;r--){let o=t[r];if(!(!o||o===".")&&(e=e?`${o}/${e}`:o,this.isAbsolute(o)))break}let s=this.#t.get(e);if(s!==void 0)return s;let i=this.cwd.resolve(e).fullpath();return this.#t.set(e,i),i}resolvePosix(...t){let e="";for(let r=t.length-1;r>=0;r--){let o=t[r];if(!(!o||o===".")&&(e=e?`${o}/${e}`:o,this.isAbsolute(o)))break}let s=this.#s.get(e);if(s!==void 0)return s;let i=this.cwd.resolve(e).fullpathPosix();return this.#s.set(e,i),i}relative(t=this.cwd){return typeof t=="string"&&(t=this.cwd.resolve(t)),t.relative()}relativePosix(t=this.cwd){return typeof t=="string"&&(t=this.cwd.resolve(t)),t.relativePosix()}basename(t=this.cwd){return typeof t=="string"&&(t=this.cwd.resolve(t)),t.name}dirname(t=this.cwd){return typeof t=="string"&&(t=this.cwd.resolve(t)),(t.parent||t).fullpath()}async readdir(t=this.cwd,e={withFileTypes:true}){typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t,t=this.cwd);let{withFileTypes:s}=e;if(t.canReaddir()){let i=await t.readdir();return s?i:i.map(r=>r.name)}else return []}readdirSync(t=this.cwd,e={withFileTypes:true}){typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t,t=this.cwd);let{withFileTypes:s=true}=e;return t.canReaddir()?s?t.readdirSync():t.readdirSync().map(i=>i.name):[]}async lstat(t=this.cwd){return typeof t=="string"&&(t=this.cwd.resolve(t)),t.lstat()}lstatSync(t=this.cwd){return typeof t=="string"&&(t=this.cwd.resolve(t)),t.lstatSync()}async readlink(t=this.cwd,{withFileTypes:e}={withFileTypes:false}){typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t.withFileTypes,t=this.cwd);let s=await t.readlink();return e?s:s?.fullpath()}readlinkSync(t=this.cwd,{withFileTypes:e}={withFileTypes:false}){typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t.withFileTypes,t=this.cwd);let s=t.readlinkSync();return e?s:s?.fullpath()}async realpath(t=this.cwd,{withFileTypes:e}={withFileTypes:false}){typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t.withFileTypes,t=this.cwd);let s=await t.realpath();return e?s:s?.fullpath()}realpathSync(t=this.cwd,{withFileTypes:e}={withFileTypes:false}){typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t.withFileTypes,t=this.cwd);let s=t.realpathSync();return e?s:s?.fullpath()}async walk(t=this.cwd,e={}){typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t,t=this.cwd);let{withFileTypes:s=true,follow:i=false,filter:r,walkFilter:o}=e,h=[];(!r||r(t))&&h.push(s?t:t.fullpath());let a=new Set,l=(c,d)=>{a.add(c),c.readdirCB((f,m)=>{if(f)return d(f);let p=m.length;if(!p)return d();let w=()=>{--p===0&&d();};for(let g of m)(!r||r(g))&&h.push(s?g:g.fullpath()),i&&g.isSymbolicLink()?g.realpath().then(S=>S?.isUnknown()?S.lstat():S).then(S=>S?.shouldWalk(a,o)?l(S,w):w()):g.shouldWalk(a,o)?l(g,w):w();},true);},u=t;return new Promise((c,d)=>{l(u,f=>{if(f)return d(f);c(h);});})}walkSync(t=this.cwd,e={}){typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t,t=this.cwd);let{withFileTypes:s=true,follow:i=false,filter:r,walkFilter:o}=e,h=[];(!r||r(t))&&h.push(s?t:t.fullpath());let a=new Set([t]);for(let l of a){let u=l.readdirSync();for(let c of u){(!r||r(c))&&h.push(s?c:c.fullpath());let d=c;if(c.isSymbolicLink()){if(!(i&&(d=c.realpathSync())))continue;d.isUnknown()&&d.lstatSync();}d.shouldWalk(a,o)&&a.add(d);}}return h}[Symbol.asyncIterator](){return this.iterate()}iterate(t=this.cwd,e={}){return typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t,t=this.cwd),this.stream(t,e)[Symbol.asyncIterator]()}[Symbol.iterator](){return this.iterateSync()}*iterateSync(t=this.cwd,e={}){typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t,t=this.cwd);let{withFileTypes:s=true,follow:i=false,filter:r,walkFilter:o}=e;(!r||r(t))&&(yield s?t:t.fullpath());let h=new Set([t]);for(let a of h){let l=a.readdirSync();for(let u of l){(!r||r(u))&&(yield s?u:u.fullpath());let c=u;if(u.isSymbolicLink()){if(!(i&&(c=u.realpathSync())))continue;c.isUnknown()&&c.lstatSync();}c.shouldWalk(h,o)&&h.add(c);}}}stream(t=this.cwd,e={}){typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t,t=this.cwd);let{withFileTypes:s=true,follow:i=false,filter:r,walkFilter:o}=e,h=new V({objectMode:true});(!r||r(t))&&h.write(s?t:t.fullpath());let a=new Set,l=[t],u=0,c=()=>{let d=false;for(;!d;){let f=l.shift();if(!f){u===0&&h.end();return}u++,a.add(f);let m=(w,g,S=false)=>{if(w)return h.emit("error",w);if(i&&!S){let E=[];for(let y of g)y.isSymbolicLink()&&E.push(y.realpath().then(b=>b?.isUnknown()?b.lstat():b));if(E.length){Promise.all(E).then(()=>m(null,g,true));return}}for(let E of g)E&&(!r||r(E))&&(h.write(s?E:E.fullpath())||(d=true));u--;for(let E of g){let y=E.realpathCached()||E;y.shouldWalk(a,o)&&l.push(y);}d&&!h.flowing?h.once("drain",c):p||c();},p=true;f.readdirCB(m,true),p=false;}};return c(),h}streamSync(t=this.cwd,e={}){typeof t=="string"?t=this.cwd.resolve(t):t instanceof R||(e=t,t=this.cwd);let{withFileTypes:s=true,follow:i=false,filter:r,walkFilter:o}=e,h=new V({objectMode:true}),a=new Set;(!r||r(t))&&h.write(s?t:t.fullpath());let l=[t],u=0,c=()=>{let d=false;for(;!d;){let f=l.shift();if(!f){u===0&&h.end();return}u++,a.add(f);let m=f.readdirSync();for(let p of m)(!r||r(p))&&(h.write(s?p:p.fullpath())||(d=true));u--;for(let p of m){let w=p;if(p.isSymbolicLink()){if(!(i&&(w=p.realpathSync())))continue;w.isUnknown()&&w.lstatSync();}w.shouldWalk(a,o)&&l.push(w);}}d&&!h.flowing&&h.once("drain",c);};return c(),h}chdir(t=this.cwd){let e=this.cwd;this.cwd=typeof t=="string"?this.cwd.resolve(t):t,this.cwd[Ye](e);}},it=class extends It{sep="\\";constructor(t=process.cwd(),e={}){let{nocase:s=true}=e;super(t,require$$1$5.win32,"\\",{...e,nocase:s}),this.nocase=s;for(let i=this.cwd;i;i=i.parent)i.nocase=this.nocase;}parseRootPath(t){return require$$1$5.win32.parse(t).root.toUpperCase()}newRoot(t){return new Pt(this.rootPath,U,void 0,this.roots,this.nocase,this.childrenCache(),{fs:t})}isAbsolute(t){return t.startsWith("/")||t.startsWith("\\")||/^[a-z]:(\/|\\)/i.test(t)}},rt=class extends It{sep="/";constructor(t=process.cwd(),e={}){let{nocase:s=false}=e;super(t,require$$1$5.posix,"/",{...e,nocase:s}),this.nocase=s;}parseRootPath(t){return "/"}newRoot(t){return new jt(this.rootPath,U,void 0,this.roots,this.nocase,this.childrenCache(),{fs:t})}isAbsolute(t){return t.startsWith("/")}},St=class extends rt{constructor(t=process.cwd(),e={}){let{nocase:s=true}=e;super(t,{...e,nocase:s});}};process.platform==="win32"?Pt:jt;var Xe=process.platform==="win32"?it:process.platform==="darwin"?St:rt;var Di=n=>n.length>=1,Mi=n=>n.length>=1,Ni=Symbol.for("nodejs.util.inspect.custom"),nt=class n{#t;#s;#n;length;#r;#o;#S;#w;#c;#h;#u=true;constructor(t,e,s,i){if(!Di(t))throw new TypeError("empty pattern list");if(!Mi(e))throw new TypeError("empty glob list");if(e.length!==t.length)throw new TypeError("mismatched pattern list and glob list lengths");if(this.length=t.length,s<0||s>=this.length)throw new TypeError("index out of range");if(this.#t=t,this.#s=e,this.#n=s,this.#r=i,this.#n===0){if(this.isUNC()){let[r,o,h,a,...l]=this.#t,[u,c,d,f,...m]=this.#s;l[0]===""&&(l.shift(),m.shift());let p=[r,o,h,a,""].join("/"),w=[u,c,d,f,""].join("/");this.#t=[p,...l],this.#s=[w,...m],this.length=this.#t.length;}else if(this.isDrive()||this.isAbsolute()){let[r,...o]=this.#t,[h,...a]=this.#s;o[0]===""&&(o.shift(),a.shift());let l=r+"/",u=h+"/";this.#t=[l,...o],this.#s=[u,...a],this.length=this.#t.length;}}}[Ni](){return "Pattern <"+this.#s.slice(this.#n).join("/")+">"}pattern(){return this.#t[this.#n]}isString(){return typeof this.#t[this.#n]=="string"}isGlobstar(){return this.#t[this.#n]===A}isRegExp(){return this.#t[this.#n]instanceof RegExp}globString(){return this.#S=this.#S||(this.#n===0?this.isAbsolute()?this.#s[0]+this.#s.slice(1).join("/"):this.#s.join("/"):this.#s.slice(this.#n).join("/"))}hasMore(){return this.length>this.#n+1}rest(){return this.#o!==void 0?this.#o:this.hasMore()?(this.#o=new n(this.#t,this.#s,this.#n+1,this.#r),this.#o.#h=this.#h,this.#o.#c=this.#c,this.#o.#w=this.#w,this.#o):this.#o=null}isUNC(){let t=this.#t;return this.#c!==void 0?this.#c:this.#c=this.#r==="win32"&&this.#n===0&&t[0]===""&&t[1]===""&&typeof t[2]=="string"&&!!t[2]&&typeof t[3]=="string"&&!!t[3]}isDrive(){let t=this.#t;return this.#w!==void 0?this.#w:this.#w=this.#r==="win32"&&this.#n===0&&this.length>1&&typeof t[0]=="string"&&/^[a-z]:$/i.test(t[0])}isAbsolute(){let t=this.#t;return this.#h!==void 0?this.#h:this.#h=t[0]===""&&t.length>1||this.isDrive()||this.isUNC()}root(){let t=this.#t[0];return typeof t=="string"&&this.isAbsolute()&&this.#n===0?t:""}checkFollowGlobstar(){return !(this.#n===0||!this.isGlobstar()||!this.#u)}markFollowGlobstar(){return this.#n===0||!this.isGlobstar()||!this.#u?false:(this.#u=false,true)}};var _i=typeof process=="object"&&process&&typeof process.platform=="string"?process.platform:"linux",ot=class{relative;relativeChildren;absolute;absoluteChildren;platform;mmopts;constructor(t,{nobrace:e,nocase:s,noext:i,noglobstar:r,platform:o=_i}){this.relative=[],this.absolute=[],this.relativeChildren=[],this.absoluteChildren=[],this.platform=o,this.mmopts={dot:true,nobrace:e,nocase:s,noext:i,noglobstar:r,optimizationLevel:2,platform:o,nocomment:true,nonegate:true};for(let h of t)this.add(h);}add(t){let e=new D(t,this.mmopts);for(let s=0;s<e.set.length;s++){let i=e.set[s],r=e.globParts[s];if(!i||!r)throw new Error("invalid pattern object");for(;i[0]==="."&&r[0]===".";)i.shift(),r.shift();let o=new nt(i,r,0,this.platform),h=new D(o.globString(),this.mmopts),a=r[r.length-1]==="**",l=o.isAbsolute();l?this.absolute.push(h):this.relative.push(h),a&&(l?this.absoluteChildren.push(h):this.relativeChildren.push(h));}}ignored(t){let e=t.fullpath(),s=`${e}/`,i=t.relative()||".",r=`${i}/`;for(let o of this.relative)if(o.match(i)||o.match(r))return  true;for(let o of this.absolute)if(o.match(e)||o.match(s))return  true;return  false}childrenIgnored(t){let e=t.fullpath()+"/",s=(t.relative()||".")+"/";for(let i of this.relativeChildren)if(i.match(s))return  true;for(let i of this.absoluteChildren)if(i.match(e))return  true;return  false}};var oe=class n{store;constructor(t=new Map){this.store=t;}copy(){return new n(new Map(this.store))}hasWalked(t,e){return this.store.get(t.fullpath())?.has(e.globString())}storeWalked(t,e){let s=t.fullpath(),i=this.store.get(s);i?i.add(e.globString()):this.store.set(s,new Set([e.globString()]));}},he=class{store=new Map;add(t,e,s){let i=(e?2:0)|(s?1:0),r=this.store.get(t);this.store.set(t,r===void 0?i:i&r);}entries(){return [...this.store.entries()].map(([t,e])=>[t,!!(e&2),!!(e&1)])}},ae=class{store=new Map;add(t,e){if(!t.canReaddir())return;let s=this.store.get(t);s?s.find(i=>i.globString()===e.globString())||s.push(e):this.store.set(t,[e]);}get(t){let e=this.store.get(t);if(!e)throw new Error("attempting to walk unknown path");return e}entries(){return this.keys().map(t=>[t,this.store.get(t)])}keys(){return [...this.store.keys()].filter(t=>t.canReaddir())}},Et=class n{hasWalkedCache;matches=new he;subwalks=new ae;patterns;follow;dot;opts;constructor(t,e){this.opts=t,this.follow=!!t.follow,this.dot=!!t.dot,this.hasWalkedCache=e?e.copy():new oe;}processPatterns(t,e){this.patterns=e;let s=e.map(i=>[t,i]);for(let[i,r]of s){this.hasWalkedCache.storeWalked(i,r);let o=r.root(),h=r.isAbsolute()&&this.opts.absolute!==false;if(o){i=i.resolve(o==="/"&&this.opts.root!==void 0?this.opts.root:o);let c=r.rest();if(c)r=c;else {this.matches.add(i,true,false);continue}}if(i.isENOENT())continue;let a,l,u=false;for(;typeof(a=r.pattern())=="string"&&(l=r.rest());)i=i.resolve(a),r=l,u=true;if(a=r.pattern(),l=r.rest(),u){if(this.hasWalkedCache.hasWalked(i,r))continue;this.hasWalkedCache.storeWalked(i,r);}if(typeof a=="string"){let c=a===".."||a===""||a===".";this.matches.add(i.resolve(a),h,c);continue}else if(a===A){(!i.isSymbolicLink()||this.follow||r.checkFollowGlobstar())&&this.subwalks.add(i,r);let c=l?.pattern(),d=l?.rest();if(!l||(c===""||c===".")&&!d)this.matches.add(i,h,c===""||c===".");else if(c===".."){let f=i.parent||i;d?this.hasWalkedCache.hasWalked(f,d)||this.subwalks.add(f,d):this.matches.add(f,h,true);}}else a instanceof RegExp&&this.subwalks.add(i,r);}return this}subwalkTargets(){return this.subwalks.keys()}child(){return new n(this.opts,this.hasWalkedCache)}filterEntries(t,e){let s=this.subwalks.get(t),i=this.child();for(let r of e)for(let o of s){let h=o.isAbsolute(),a=o.pattern(),l=o.rest();a===A?i.testGlobstar(r,o,l,h):a instanceof RegExp?i.testRegExp(r,a,l,h):i.testString(r,a,l,h);}return i}testGlobstar(t,e,s,i){if((this.dot||!t.name.startsWith("."))&&(e.hasMore()||this.matches.add(t,i,false),t.canReaddir()&&(this.follow||!t.isSymbolicLink()?this.subwalks.add(t,e):t.isSymbolicLink()&&(s&&e.checkFollowGlobstar()?this.subwalks.add(t,s):e.markFollowGlobstar()&&this.subwalks.add(t,e)))),s){let r=s.pattern();if(typeof r=="string"&&r!==".."&&r!==""&&r!==".")this.testString(t,r,s.rest(),i);else if(r===".."){let o=t.parent||t;this.subwalks.add(o,s);}else r instanceof RegExp&&this.testRegExp(t,r,s.rest(),i);}}testRegExp(t,e,s,i){e.test(t.name)&&(s?this.subwalks.add(t,s):this.matches.add(t,i,false));}testString(t,e,s,i){t.isNamed(e)&&(s?this.subwalks.add(t,s):this.matches.add(t,i,false));}};var Li=(n,t)=>typeof n=="string"?new ot([n],t):Array.isArray(n)?new ot(n,t):n,zt=class{path;patterns;opts;seen=new Set;paused=false;aborted=false;#t=[];#s;#n;signal;maxDepth;includeChildMatches;constructor(t,e,s){if(this.patterns=t,this.path=e,this.opts=s,this.#n=!s.posix&&s.platform==="win32"?"\\":"/",this.includeChildMatches=s.includeChildMatches!==false,(s.ignore||!this.includeChildMatches)&&(this.#s=Li(s.ignore??[],s),!this.includeChildMatches&&typeof this.#s.add!="function")){let i="cannot ignore child matches, ignore lacks add() method.";throw new Error(i)}this.maxDepth=s.maxDepth||1/0,s.signal&&(this.signal=s.signal,this.signal.addEventListener("abort",()=>{this.#t.length=0;}));}#r(t){return this.seen.has(t)||!!this.#s?.ignored?.(t)}#o(t){return !!this.#s?.childrenIgnored?.(t)}pause(){this.paused=true;}resume(){if(this.signal?.aborted)return;this.paused=false;let t;for(;!this.paused&&(t=this.#t.shift());)t();}onResume(t){this.signal?.aborted||(this.paused?this.#t.push(t):t());}async matchCheck(t,e){if(e&&this.opts.nodir)return;let s;if(this.opts.realpath){if(s=t.realpathCached()||await t.realpath(),!s)return;t=s;}let r=t.isUnknown()||this.opts.stat?await t.lstat():t;if(this.opts.follow&&this.opts.nodir&&r?.isSymbolicLink()){let o=await r.realpath();o&&(o.isUnknown()||this.opts.stat)&&await o.lstat();}return this.matchCheckTest(r,e)}matchCheckTest(t,e){return t&&(this.maxDepth===1/0||t.depth()<=this.maxDepth)&&(!e||t.canReaddir())&&(!this.opts.nodir||!t.isDirectory())&&(!this.opts.nodir||!this.opts.follow||!t.isSymbolicLink()||!t.realpathCached()?.isDirectory())&&!this.#r(t)?t:void 0}matchCheckSync(t,e){if(e&&this.opts.nodir)return;let s;if(this.opts.realpath){if(s=t.realpathCached()||t.realpathSync(),!s)return;t=s;}let r=t.isUnknown()||this.opts.stat?t.lstatSync():t;if(this.opts.follow&&this.opts.nodir&&r?.isSymbolicLink()){let o=r.realpathSync();o&&(o?.isUnknown()||this.opts.stat)&&o.lstatSync();}return this.matchCheckTest(r,e)}matchFinish(t,e){if(this.#r(t))return;if(!this.includeChildMatches&&this.#s?.add){let r=`${t.relativePosix()}/**`;this.#s.add(r);}let s=this.opts.absolute===void 0?e:this.opts.absolute;this.seen.add(t);let i=this.opts.mark&&t.isDirectory()?this.#n:"";if(this.opts.withFileTypes)this.matchEmit(t);else if(s){let r=this.opts.posix?t.fullpathPosix():t.fullpath();this.matchEmit(r+i);}else {let r=this.opts.posix?t.relativePosix():t.relative(),o=this.opts.dotRelative&&!r.startsWith(".."+this.#n)?"."+this.#n:"";this.matchEmit(r?o+r+i:"."+i);}}async match(t,e,s){let i=await this.matchCheck(t,s);i&&this.matchFinish(i,e);}matchSync(t,e,s){let i=this.matchCheckSync(t,s);i&&this.matchFinish(i,e);}walkCB(t,e,s){this.signal?.aborted&&s(),this.walkCB2(t,e,new Et(this.opts),s);}walkCB2(t,e,s,i){if(this.#o(t))return i();if(this.signal?.aborted&&i(),this.paused){this.onResume(()=>this.walkCB2(t,e,s,i));return}s.processPatterns(t,e);let r=1,o=()=>{--r===0&&i();};for(let[h,a,l]of s.matches.entries())this.#r(h)||(r++,this.match(h,a,l).then(()=>o()));for(let h of s.subwalkTargets()){if(this.maxDepth!==1/0&&h.depth()>=this.maxDepth)continue;r++;let a=h.readdirCached();h.calledReaddir()?this.walkCB3(h,a,s,o):h.readdirCB((l,u)=>this.walkCB3(h,u,s,o),true);}o();}walkCB3(t,e,s,i){s=s.filterEntries(t,e);let r=1,o=()=>{--r===0&&i();};for(let[h,a,l]of s.matches.entries())this.#r(h)||(r++,this.match(h,a,l).then(()=>o()));for(let[h,a]of s.subwalks.entries())r++,this.walkCB2(h,a,s.child(),o);o();}walkCBSync(t,e,s){this.signal?.aborted&&s(),this.walkCB2Sync(t,e,new Et(this.opts),s);}walkCB2Sync(t,e,s,i){if(this.#o(t))return i();if(this.signal?.aborted&&i(),this.paused){this.onResume(()=>this.walkCB2Sync(t,e,s,i));return}s.processPatterns(t,e);let r=1,o=()=>{--r===0&&i();};for(let[h,a,l]of s.matches.entries())this.#r(h)||this.matchSync(h,a,l);for(let h of s.subwalkTargets()){if(this.maxDepth!==1/0&&h.depth()>=this.maxDepth)continue;r++;let a=h.readdirSync();this.walkCB3Sync(h,a,s,o);}o();}walkCB3Sync(t,e,s,i){s=s.filterEntries(t,e);let r=1,o=()=>{--r===0&&i();};for(let[h,a,l]of s.matches.entries())this.#r(h)||this.matchSync(h,a,l);for(let[h,a]of s.subwalks.entries())r++,this.walkCB2Sync(h,a,s.child(),o);o();}},xt=class extends zt{matches=new Set;constructor(t,e,s){super(t,e,s);}matchEmit(t){this.matches.add(t);}async walk(){if(this.signal?.aborted)throw this.signal.reason;return this.path.isUnknown()&&await this.path.lstat(),await new Promise((t,e)=>{this.walkCB(this.path,this.patterns,()=>{this.signal?.aborted?e(this.signal.reason):t(this.matches);});}),this.matches}walkSync(){if(this.signal?.aborted)throw this.signal.reason;return this.path.isUnknown()&&this.path.lstatSync(),this.walkCBSync(this.path,this.patterns,()=>{if(this.signal?.aborted)throw this.signal.reason}),this.matches}},vt=class extends zt{results;constructor(t,e,s){super(t,e,s),this.results=new V({signal:this.signal,objectMode:true}),this.results.on("drain",()=>this.resume()),this.results.on("resume",()=>this.resume());}matchEmit(t){this.results.write(t),this.results.flowing||this.pause();}stream(){let t=this.path;return t.isUnknown()?t.lstat().then(()=>{this.walkCB(t,this.patterns,()=>this.results.end());}):this.walkCB(t,this.patterns,()=>this.results.end()),this.results}streamSync(){return this.path.isUnknown()&&this.path.lstatSync(),this.walkCBSync(this.path,this.patterns,()=>this.results.end()),this.results}};var Pi=typeof process=="object"&&process&&typeof process.platform=="string"?process.platform:"linux",I=class{absolute;cwd;root;dot;dotRelative;follow;ignore;magicalBraces;mark;matchBase;maxDepth;nobrace;nocase;nodir;noext;noglobstar;pattern;platform;realpath;scurry;stat;signal;windowsPathsNoEscape;withFileTypes;includeChildMatches;opts;patterns;constructor(t,e){if(!e)throw new TypeError("glob options required");if(this.withFileTypes=!!e.withFileTypes,this.signal=e.signal,this.follow=!!e.follow,this.dot=!!e.dot,this.dotRelative=!!e.dotRelative,this.nodir=!!e.nodir,this.mark=!!e.mark,e.cwd?(e.cwd instanceof URL||e.cwd.startsWith("file://"))&&(e.cwd=require$$1$2.fileURLToPath(e.cwd)):this.cwd="",this.cwd=e.cwd||"",this.root=e.root,this.magicalBraces=!!e.magicalBraces,this.nobrace=!!e.nobrace,this.noext=!!e.noext,this.realpath=!!e.realpath,this.absolute=e.absolute,this.includeChildMatches=e.includeChildMatches!==false,this.noglobstar=!!e.noglobstar,this.matchBase=!!e.matchBase,this.maxDepth=typeof e.maxDepth=="number"?e.maxDepth:1/0,this.stat=!!e.stat,this.ignore=e.ignore,this.withFileTypes&&this.absolute!==void 0)throw new Error("cannot set absolute and withFileTypes:true");if(typeof t=="string"&&(t=[t]),this.windowsPathsNoEscape=!!e.windowsPathsNoEscape||e.allowWindowsEscape===false,this.windowsPathsNoEscape&&(t=t.map(a=>a.replace(/\\/g,"/"))),this.matchBase){if(e.noglobstar)throw new TypeError("base matching requires globstar");t=t.map(a=>a.includes("/")?a:`./**/${a}`);}if(this.pattern=t,this.platform=e.platform||Pi,this.opts={...e,platform:this.platform},e.scurry){if(this.scurry=e.scurry,e.nocase!==void 0&&e.nocase!==e.scurry.nocase)throw new Error("nocase option contradicts provided scurry option")}else {let a=e.platform==="win32"?it:e.platform==="darwin"?St:e.platform?rt:Xe;this.scurry=new a(this.cwd,{nocase:e.nocase,fs:e.fs});}this.nocase=this.scurry.nocase;let s=this.platform==="darwin"||this.platform==="win32",i={braceExpandMax:1e4,...e,dot:this.dot,matchBase:this.matchBase,nobrace:this.nobrace,nocase:this.nocase,nocaseMagicOnly:s,nocomment:true,noext:this.noext,nonegate:true,optimizationLevel:2,platform:this.platform,windowsPathsNoEscape:this.windowsPathsNoEscape,debug:!!this.opts.debug},r=this.pattern.map(a=>new D(a,i)),[o,h]=r.reduce((a,l)=>(a[0].push(...l.set),a[1].push(...l.globParts),a),[[],[]]);this.patterns=o.map((a,l)=>{let u=h[l];if(!u)throw new Error("invalid pattern object");return new nt(a,u,0,this.platform)});}async walk(){return [...await new xt(this.patterns,this.scurry.cwd,{...this.opts,maxDepth:this.maxDepth!==1/0?this.maxDepth+this.scurry.cwd.depth():1/0,platform:this.platform,nocase:this.nocase,includeChildMatches:this.includeChildMatches}).walk()]}walkSync(){return [...new xt(this.patterns,this.scurry.cwd,{...this.opts,maxDepth:this.maxDepth!==1/0?this.maxDepth+this.scurry.cwd.depth():1/0,platform:this.platform,nocase:this.nocase,includeChildMatches:this.includeChildMatches}).walkSync()]}stream(){return new vt(this.patterns,this.scurry.cwd,{...this.opts,maxDepth:this.maxDepth!==1/0?this.maxDepth+this.scurry.cwd.depth():1/0,platform:this.platform,nocase:this.nocase,includeChildMatches:this.includeChildMatches}).stream()}streamSync(){return new vt(this.patterns,this.scurry.cwd,{...this.opts,maxDepth:this.maxDepth!==1/0?this.maxDepth+this.scurry.cwd.depth():1/0,platform:this.platform,nocase:this.nocase,includeChildMatches:this.includeChildMatches}).streamSync()}iterateSync(){return this.streamSync()[Symbol.iterator]()}[Symbol.iterator](){return this.iterateSync()}iterate(){return this.stream()[Symbol.asyncIterator]()}[Symbol.asyncIterator](){return this.iterate()}};var le=(n,t={})=>{Array.isArray(n)||(n=[n]);for(let e of n)if(new D(e,t).hasMagic())return  true;return  false};function Bt(n,t={}){return new I(n,t).streamSync()}function Qe(n,t={}){return new I(n,t).stream()}function ts(n,t={}){return new I(n,t).walkSync()}async function Je(n,t={}){return new I(n,t).walk()}function Ut(n,t={}){return new I(n,t).iterateSync()}function es(n,t={}){return new I(n,t).iterate()}var ji=Bt,Ii=Object.assign(Qe,{sync:Bt}),zi=Ut,Bi=Object.assign(es,{sync:Ut}),Ui=Object.assign(ts,{stream:Bt,iterate:Ut}),Ze=Object.assign(Je,{glob:Je,globSync:ts,sync:Ui,globStream:Qe,stream:Ii,globStreamSync:Bt,streamSync:ji,globIterate:es,iterate:Bi,globIterateSync:Ut,iterateSync:zi,Glob:I,hasMagic:le,escape:tt,unescape:W});Ze.glob=Ze;
 
 async function run() {
     try {
