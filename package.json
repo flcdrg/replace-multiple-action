@@ -54,7 +54,7 @@
     "nerdbank-gitversioning": "^3.10.85",
     "patch-package": "^8.0.1",
     "prettier": "^3.1.1",
-    "rollup": "^4.62.0",
+    "rollup": "^4.62.2",
     "rollup-plugin-license": "^3.7.1",
     "ts-jest": "^29.4.11",
     "typescript": "^6.0.3"
