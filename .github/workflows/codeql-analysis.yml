@@ -35,14 +35,14 @@ jobs:
       - uses: pnpm/action-setup@v6.0.10
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4.37.6
+        uses: github/codeql-action/init@v4.37.7
         with:
           config-file: .github/codeql/codeql-config.yml
           languages: ${{ matrix.language }}
           source-root: src
 
       - name: Autobuild
-        uses: github/codeql-action/autobuild@v4.37.6
+        uses: github/codeql-action/autobuild@v4.37.7
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v4.37.6
+        uses: github/codeql-action/analyze@v4.37.7
