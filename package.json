@@ -51,7 +51,7 @@
     "globals": "^17.11.0",
     "jest": "^30.5.0",
     "js-yaml": "^5.4.1",
-    "nerdbank-gitversioning": "^3.10.91",
+    "nerdbank-gitversioning": "^3.10.94",
     "patch-package": "^8.0.1",
     "prettier": "^3.1.1",
     "rollup": "^4.63.1",
