@@ -28,7 +28,7 @@
   "dependencies": {
     "@actions/core": "^3.0.1",
     "axios": "^1.21.1",
-    "glob": "^13.0.6",
+    "glob": "^14.0.4",
     "lru-cache": "^11.5.3",
     "tslib": "^2.9.1"
   },
